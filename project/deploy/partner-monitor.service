@@ -1,0 +1,21 @@
+[Unit]
+Description=Telegram partner advertisements monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=monitor
+WorkingDirectory=/opt/partner-monitor
+EnvironmentFile=/opt/partner-monitor/.env
+ExecStart=/opt/partner-monitor/.venv/bin/partner-monitor --config /opt/partner-monitor/config.yaml run
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/partner-monitor/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

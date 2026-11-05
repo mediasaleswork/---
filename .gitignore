@@ -1,0 +1,24 @@
+# Local environments and Python build outputs
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Account credentials and local application state
+.env
+.env.*
+!.env.example
+config.yaml
+secrets/
+data/
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
+*.sqlite
+*.sqlite3
+*.db
+*.log

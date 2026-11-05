@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "partner-monitor"
+version = "0.4.0"
+description = "Telegram partner advertisements monitoring and screenshot reports"
+requires-python = ">=3.11"
+dependencies = [
+  "Telethon>=1.36,<2",
+  "playwright>=1.48,<2",
+  "openpyxl>=3.1,<4",
+  "Pillow>=10,<13",
+  "PyYAML>=6,<7",
+  "google-auth>=2.35,<3",
+  "google-auth-oauthlib>=1.2,<2",
+  "requests>=2.32,<3",
+  "pypdf>=5,<7",
+  "tzdata>=2024.1",
+]
+
+[project.scripts]
+partner-monitor = "partner_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["partner_monitor*"]

@@ -1,0 +1,19 @@
+{
+  "thread_id": "01a1ab82-ae0a-78d0-9ec8-3d3b044bbadc",
+  "exported_at": "2026-11-05T22:10:03.403164+05:00",
+  "timezone": "Asia/Tashkent",
+  "message_count": 40,
+  "roles": {
+    "user": 10,
+    "assistant": 30
+  },
+  "phases": {
+    "user": 10,
+    "commentary": 21,
+    "question": 3,
+    "final_answer": 6
+  },
+  "operation_count": 131,
+  "original_user_attachments": 4,
+  "project_version": "0.4.0"
+}

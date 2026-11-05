@@ -6,11 +6,12 @@ import math
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.drawing.image import Image
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.utils.units import pixels_to_EMU
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.hyperlink import Hyperlink
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.formatting.rule import CellIsRule
@@ -76,10 +77,9 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         cell.font = Font(name="Arial", size=10, color="1567B0", underline="single")
 
     def band(sheet, row, title):
-        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
         cell = put(sheet, row, 1, title, True)
-        cell.fill = PatternFill("solid", fgColor=RED)
-        cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=GRAY)
         sheet.row_dimensions[row].height = 23
 
     report.merge_cells("A2:C2")
@@ -87,15 +87,26 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     report.merge_cells("D2:L2")
     put(report, 2, 4, "Размещения рекламы", True).font = Font(name="Arial", size=16, bold=True, color=INK)
     report.merge_cells("A4:L4")
-    put(report, 4, 1, f"Период публикаций: {month or 'все даты'}. Время: {timezone}. План и остаток — за весь срок заявки.")
+    put(report, 4, 1, f"Период публикаций: {month or 'все даты'}. Время: {timezone}. Заказано, опубликовано и осталось — за весь срок заявки.")
     report.merge_cells("A5:L5")
-    put(report, 5, 1, note or "Из реестра можно перейти к снимку поста внутри этой книги. Пустой план означает, что количество публикаций не указано полностью.")
+    put(report, 5, 1, note or "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён.")
     report.row_dimensions[5].height = 30
     band(report, 7, "ТГ КАНАЛЫ")
-    headers = ["№", "Клиент", "Канал", "Язык", "План всего", "Вышло всего", "Остаток", "В отчёте", "Недоступны", "Снимки", "Последний выход", "Публикации"]
+    headers = ["№", "Клиент", "Канал", "Язык", "Заказано постов", "Опубликовано", "Осталось опубликовать", "Постов за период", "Не удалось открыть", "Постов со скриншотом", "Последняя публикация", "Публикации"]
+    explanations = {
+        5: "Сколько публикаций заказано по всем заявкам этого клиента в этом канале. Пусто, если заказанное количество указано не полностью.",
+        6: "Сколько уникальных постов найдено за весь срок заявок, включая посты, которые позднее стали недоступны.",
+        7: "Заказано минус опубликовано за весь срок заявок. Например: 10 − 4 = 6. Пусто, если заказанное количество неизвестно.",
+        8: "Сколько постов включено в выбранный месяц отчёта. Если выбраны все даты, совпадает с общим числом опубликованных постов.",
+        9: "Сколько постов за выбранный период сейчас недоступны для проверки. Потеря доступа или ошибка API не доказывает удаление.",
+        10: "Сколько постов за выбранный период имеют сохранённый скриншот. Несколько снимков одного поста считаются один раз.",
+    }
     for col, value in enumerate(headers, 1):
-        put(report, 8, col, value, True).fill = PatternFill("solid", fgColor=GRAY)
-    report.row_dimensions[8].height = 32
+        cell = put(report, 8, col, value, True)
+        cell.fill = PatternFill("solid", fgColor=GRAY)
+        if col in explanations:
+            cell.comment = Comment(explanations[col], "Partner Monitor")
+    report.row_dimensions[8].height = 44
     summary_links = []
     for index, item in enumerate(view["summary"], 1):
         row = index + 8
@@ -116,7 +127,8 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     report.auto_filter.ref = f"A8:L{summary_end}"
     if summary_end > 8:
         report.conditional_formatting.add(f"I9:I{summary_end}", CellIsRule(operator="greaterThan", formula=["0"], fill=PatternFill("solid", fgColor=PINK)))
-    report.freeze_panes = "D9"
+    # A split at D9 leaves a cross through post cards in spreadsheet viewers.
+    report.freeze_panes = None
     for col, width in {"A": 6, "B": 21, "C": 25, "D": 9, "E": 11, "F": 12, "G": 11, "H": 12, "I": 12, "J": 10, "K": 23, "L": 19}.items():
         report.column_dimensions[col].width = width
     row = summary_end + 3
@@ -130,51 +142,50 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         report.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
         heading = put(report, row, 1, f"Пост #{item['id']}    {item['client']}    {item['channel']}", True)
         heading.fill = PatternFill("solid", fgColor=GRAY)
-        heading.border = Border(top=Side(style="medium", color=RED))
         report.row_dimensions[row].height = 28
         picture = None
         if item["picture_path"]:
             try:
                 picture = Image(item["picture_path"])
-                scale = min(360 / picture.width, 1600 / picture.height)
+                # Fit the complete post into a preview; never enlarge small images.
+                scale = min(1, 240 / picture.width, 280 / picture.height)
                 picture.width = round(picture.width * scale)
                 picture.height = round(picture.height * scale)
             except (OSError, ValueError):
                 item["picture_note"] = "Файл последнего скриншота не удалось прочитать"
-        height = picture.height if picture else 380
-        block_rows = max(15, math.ceil((height + 16) / 36))
-        for r in range(row + 1, row + block_rows + 1):
-            report.row_dimensions[r].height = 27
-        fields = [("Клиент", item["client"]), ("Реклама", item["ad"]), ("Канал", item["channel_url"]),
-                  ("Пост", item["url"]), ("Опубликован", item["published"]), ("Состояние", item["state"]),
-                  ("Доступность проверена", item["checked"]),
-                  ("Просмотры", item["views"] if item["views"] is not None else "Нет данных"), ("Просмотры измерены", item["views_checked"]),
+        fields = [("Реклама", item["ad"]), ("Ссылка на пост", item["url"]),
+                  ("Опубликован", item["published"]), ("Состояние", item["state"]),
+                  ("Просмотры", item["views"] if item["views"] is not None else "Нет данных"),
                   ("Размещение, часов", "; ".join(f"{h:g}" for h in item["durations"]) or "Не указано"),
                   ("Плановое снятие", item["until"]), ("Снимок сделан", item["picture_at"]),
                   ("Примечание", item["picture_note"] or item["error"])]
+        height = picture.height if picture else 0
+        block_rows = max(len(fields) + 1, math.ceil((height + 16) / 32))
+        for r in range(row + 1, row + block_rows + 1):
+            report.row_dimensions[r].height = 24
         for offset, (label, value) in enumerate(fields, 1):
             report.merge_cells(start_row=row + offset, start_column=1, end_row=row + offset, end_column=2)
             put(report, row + offset, 1, label, True)
             report.merge_cells(start_row=row + offset, start_column=3, end_row=row + offset, end_column=6)
             cell = put(report, row + offset, 3, value)
-            if offset in {5, 7, 9, 11, 12}:
+            if label in {"Опубликован", "Плановое снятие", "Снимок сделан"}:
                 date_cell(report, row + offset, 3, value)
-            if label in {"Канал", "Пост"} and value:
+            if label == "Ссылка на пост" and value:
                 cell.hyperlink = value
                 cell.font = Font(name="Arial", size=10, color="1567B0", underline="single")
             if label == "Примечание" and value:
-                report.row_dimensions[row + offset].height = max(27, min(100, math.ceil(len(value) / 60) * 14))
-        jump(put(report, row + 14, 3, ""), "Реестр публикаций", f"A{registry_rows[item['id']]}", "Вернуться в реестр")
+                report.row_dimensions[row + offset].height = max(24, min(100, math.ceil(len(value) / 60) * 14))
+        jump(put(report, row + len(fields) + 1, 3, ""), "Реестр публикаций", f"A{registry_rows[item['id']]}", "Вернуться в реестр")
         if picture:
             picture.anchor = OneCellAnchor(
                 _from=AnchorMarker(col=6, row=row, colOff=pixels_to_EMU(12), rowOff=pixels_to_EMU(6)),
                 ext=XDRPositiveSize2D(pixels_to_EMU(picture.width), pixels_to_EMU(picture.height)))
             report.add_image(picture)
         else:
-            report.merge_cells(start_row=row + 1, start_column=7, end_row=row + 10, end_column=12)
+            report.merge_cells(start_row=row + 1, start_column=7, end_row=row + len(fields), end_column=12)
             placeholder = put(report, row + 1, 7, item["picture_note"] or "Скриншот ещё не получен")
             placeholder.fill = PatternFill("solid", fgColor=GRAY)
-        row += block_rows + 3
+        row += block_rows + 2
     for row, post_id in summary_links:
         jump(put(report, row, 12, ""), "Отчёт", f"A{anchors[post_id]}", "Открыть посты")
     if not view["records"]:
@@ -241,7 +252,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
             cell.font = Font(name="Arial", size=10, bold=True, color=INK)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.row_dimensions[1].height = 34
-        sheet.freeze_panes = "C2"
+        sheet.freeze_panes = "A2"
         sheet.print_title_rows = "1:1"
         for cells in sheet.iter_rows(min_row=2):
             sheet.row_dimensions[cells[0].row].height = 45

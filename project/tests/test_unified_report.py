@@ -93,6 +93,42 @@ class UnifiedReportTests(unittest.TestCase):
         finally:
             book.close()
 
+    def test_compact_previews_preserve_full_images_without_enlarging_them(self):
+        from io import BytesIO
+        from zipfile import ZipFile
+        from openpyxl.utils.units import EMU_to_pixels
+
+        self.posts[0]["published_at"] = "2026-10-01T12:00:00+00:00"
+        for size in [(92, 201), (720, 3600), (1400, 200)]:
+            with self.subTest(size=size):
+                Image.new("RGB", size, "white").save(self.old)
+                path = export_xlsx(self.partners, self.posts, self.snapshots, self.root / "out.xlsx")
+                with ZipFile(path) as archive:
+                    media = [name for name in archive.namelist() if name.startswith("xl/media/")]
+                    self.assertEqual(len(media), 1)
+                    with Image.open(BytesIO(archive.read(media[0]))) as original:
+                        self.assertEqual(original.size, size)
+                book = load_workbook(path)
+                try:
+                    sheet = book["Отчёт"]
+                    self.assertIsNone(sheet.freeze_panes)
+                    picture = sheet._images[0]
+                    width = EMU_to_pixels(picture.anchor.ext.cx)
+                    height = EMU_to_pixels(picture.anchor.ext.cy)
+                    self.assertLessEqual(width, min(240, size[0]))
+                    self.assertLessEqual(height, min(280, size[1]))
+                    self.assertLessEqual(abs(width * size[1] - height * size[0]),
+                                         (size[0] + size[1]) / 2)
+                    if size == (92, 201):
+                        self.assertEqual((width, height), size)
+                    next_card = next(cell.row for cell in sheet["A"]
+                                     if isinstance(cell.value, str) and cell.value.startswith("Пост #2"))
+                    available = sum((sheet.row_dimensions[r].height or sheet.sheet_format.defaultRowHeight) * 4 / 3
+                                    for r in range(picture.anchor._from.row + 1, next_card))
+                    self.assertLess(height + 6, available)
+                finally:
+                    book.close()
+
     def test_optional_client_plan_and_language_persist_across_restart(self):
         path = self.root / "db.sqlite3"
         config = Config(root=self.root, source_group="group", keywords=[], domains=[])

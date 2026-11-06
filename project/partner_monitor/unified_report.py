@@ -11,7 +11,7 @@ from openpyxl.drawing.image import Image
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.utils.units import pixels_to_EMU
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.hyperlink import Hyperlink
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.formatting.rule import CellIsRule
@@ -70,6 +70,9 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         cell.alignment = Alignment(horizontal="center", vertical="center")
         return cell
 
+    def shown_time(value):
+        return datetime.fromisoformat(value).strftime("%d.%m.%Y %H:%M") if value else "Не указано"
+
     def jump(cell, sheet_name, address, label):
         cell.value = label
         cell.data_type = "s"
@@ -91,10 +94,10 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     report.merge_cells("A5:L5")
     put(report, 5, 1, note or "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён.")
     report.row_dimensions[5].height = 30
-    band(report, 7, "ТГ КАНАЛЫ")
-    headers = ["№", "Клиент", "Канал", "Язык", "Заказано постов", "Опубликовано", "Осталось опубликовать", "Постов за период", "Не удалось открыть", "Постов со скриншотом", "Последняя публикация", "Публикации"]
+    band(report, 7, "СВОДКА ПО ПЛОЩАДКАМ")
+    headers = ["№", "Инструмент", "Площадки", "Язык", "Заказано постов", "Опубликовано", "Осталось опубликовать", "Постов за период", "Не удалось открыть", "Постов со скриншотом", "Последняя публикация", "Публикации"]
     explanations = {
-        5: "Сколько публикаций заказано по всем заявкам этого клиента в этом канале. Пусто, если заказанное количество указано не полностью.",
+        5: "Сколько публикаций заказано по всем заявкам этого инструмента на этой площадке. Пусто, если заказанное количество указано не полностью.",
         6: "Сколько уникальных постов найдено за весь срок заявок, включая посты, которые позднее стали недоступны.",
         7: "Заказано минус опубликовано за весь срок заявок. Например: 10 − 4 = 6. Пусто, если заказанное количество неизвестно.",
         8: "Сколько постов включено в выбранный месяц отчёта. Если выбраны все даты, совпадает с общим числом опубликованных постов.",
@@ -110,7 +113,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     summary_links = []
     for index, item in enumerate(view["summary"], 1):
         row = index + 8
-        values = [index, item["client"], item["channel"], item["languages"], item["plan"], item["total"], None,
+        values = [index, item["client"].replace("Клиент не указан", "Инструмент не указан"), item["channel"], item["languages"], item["plan"], item["total"], None,
                   item["visible_count"], item["unavailable_count"], item["picture_count"]]
         for col, value in enumerate(values, 1):
             put(report, row, col, value)
@@ -133,69 +136,117 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         report.column_dimensions[col].width = width
     row = summary_end + 3
     band(report, row, "ПУБЛИКАЦИИ И СКРИНШОТЫ")
+    report.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=12)
+    put(report, row + 1, 1, "Одна строка — один пост. Нажмите на публикацию, чтобы открыть Telegram; на инструмент — чтобы перейти в реестр.")
+    report.row_dimensions[row + 1].height = 25
     row += 2
+    columns = [(1, 2, "Инструмент"), (3, 4, "Площадки"), (5, 6, "Публикация"),
+               (7, 9, "Данные поста"), (10, 12, "Скриншот")]
+    edge = Side(style="thin", color="DDE1E6")
+    group_edge = Side(style="medium", color="B9C2CD")
+
+    def table_cell(row, first, last, value, fill, top=edge, bold=False):
+        report.merge_cells(start_row=row, start_column=first, end_row=row, end_column=last)
+        cell = put(report, row, first, value, bold)
+        cell.alignment = Alignment(vertical="top", wrap_text=True, indent=1)
+        for col in range(first, last + 1):
+            target = report.cell(row, col)
+            target.fill = PatternFill("solid", fgColor=fill)
+            target.border = Border(top=top, bottom=edge,
+                                   left=edge if col == first else Side(),
+                                   right=edge if col == last else Side())
+        return cell
+
+    for first, last, label in columns:
+        table_cell(row, first, last, label, GRAY, bold=True)
+    report.row_dimensions[row].height = 29
+    row += 1
     anchors = {}
     record_by_id = {r["id"]: r for r in view["records"]}
     registry_rows = {p["id"]: i + 2 for i, p in enumerate(filtered_posts)}
-    for item in view["records"]:
+    partner_ids = {p["id"]: p["partner_id"] for p in filtered_posts}
+    records = sorted(view["records"], key=lambda p: (p["client"].casefold(), p["channel"].casefold(),
+                                                    partner_ids[p["id"]], p["published"], p["id"]))
+    previous_group = None
+    group_number = -1
+    for item in records:
         anchors[item["id"]] = row
-        report.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        heading = put(report, row, 1, f"Пост #{item['id']}    {item['client']}    {item['channel']}", True)
-        heading.fill = PatternFill("solid", fgColor=GRAY)
-        report.row_dimensions[row].height = 28
+        group = (item["client"].casefold(), partner_ids[item["id"]])
+        first_in_group = group != previous_group
+        if first_in_group:
+            group_number += 1
+        fill = "FFFFFF" if group_number % 2 == 0 else "F7F8FA"
+        top = group_edge if first_in_group else edge
+        instrument = item["client"].replace("Клиент не указан", "Инструмент не указан")
+        tool_cell = table_cell(row, 1, 2, instrument, fill, top, bold=True)
+        jump(tool_cell, "Реестр публикаций", f"A{registry_rows[item['id']]}", instrument)
+        platform = table_cell(row, 3, 4, item["channel"], fill, top, bold=True)
+        if item["channel_url"]:
+            platform.hyperlink = item["channel_url"]
+            platform.font = Font(name="Arial", size=10, color="1567B0", underline="single")
+        ad = item["ad"] or "Название рекламы не указано"
+        short_ad = ad if len(ad) <= 180 else ad[:177] + "…"
+        publication = f"Пост #{item['id']}\n{short_ad}\n\nОткрыть публикацию ↗"
+        post_cell = table_cell(row, 5, 6, publication, fill, top)
+        if item["url"]:
+            post_cell.hyperlink = item["url"]
+            post_cell.font = Font(name="Arial", size=10, color="1567B0", underline="single")
+        if short_ad != ad:
+            post_cell.comment = Comment(ad[:32767], "Partner Monitor")
         picture = None
         if item["picture_path"]:
             try:
                 picture = Image(item["picture_path"])
                 # Fit the complete post into a preview; never enlarge small images.
                 scale = min(1, 240 / picture.width, 280 / picture.height)
-                picture.width = round(picture.width * scale)
-                picture.height = round(picture.height * scale)
+                picture.width = max(1, round(picture.width * scale))
+                picture.height = max(1, round(picture.height * scale))
             except (OSError, ValueError):
+                picture = None
                 item["picture_note"] = "Файл последнего скриншота не удалось прочитать"
-        fields = [("Реклама", item["ad"]), ("Ссылка на пост", item["url"]),
-                  ("Опубликован", item["published"]), ("Состояние", item["state"]),
+
+        fields = [("Опубликован", shown_time(item["published"])), ("Статус", item["state"]),
                   ("Просмотры", item["views"] if item["views"] is not None else "Нет данных"),
-                  ("Размещение, часов", "; ".join(f"{h:g}" for h in item["durations"]) or "Не указано"),
-                  ("Плановое снятие", item["until"]), ("Снимок сделан", item["picture_at"]),
-                  ("Примечание", item["picture_note"] or item["error"])]
-        height = picture.height if picture else 0
-        block_rows = max(len(fields) + 1, math.ceil((height + 16) / 32))
-        for r in range(row + 1, row + block_rows + 1):
-            report.row_dimensions[r].height = 24
-        for offset, (label, value) in enumerate(fields, 1):
-            report.merge_cells(start_row=row + offset, start_column=1, end_row=row + offset, end_column=2)
-            put(report, row + offset, 1, label, True)
-            report.merge_cells(start_row=row + offset, start_column=3, end_row=row + offset, end_column=6)
-            cell = put(report, row + offset, 3, value)
-            if label in {"Опубликован", "Плановое снятие", "Снимок сделан"}:
-                date_cell(report, row + offset, 3, value)
-            if label == "Ссылка на пост" and value:
-                cell.hyperlink = value
-                cell.font = Font(name="Arial", size=10, color="1567B0", underline="single")
-            if label == "Примечание" and value:
-                report.row_dimensions[row + offset].height = max(24, min(100, math.ceil(len(value) / 60) * 14))
-        jump(put(report, row + len(fields) + 1, 3, ""), "Реестр публикаций", f"A{registry_rows[item['id']]}", "Вернуться в реестр")
+                  ("Замер просмотров", shown_time(item["views_checked"])),
+                  ("Размещение", ("; ".join(f"{h:g}" for h in item["durations"]) + " ч") if item["durations"] else "Не указано"),
+                  ("Плановое снятие", shown_time(item["until"])),
+                  ("Снимок сделан", shown_time(item["picture_at"]))]
+        information = "\n".join(f"{label}: {value}" for label, value in fields)
+        note_text = "\n".join(dict.fromkeys(t for t in (item["picture_note"], item["error"]) if t))
+        if note_text:
+            visible_note = note_text if len(note_text) <= 160 else note_text[:157] + "…"
+            information += "\n\n" + visible_note
+        data_cell = table_cell(row, 7, 9, information, fill, top)
+        if note_text:
+            data_cell.comment = Comment(note_text[:32767], "Partner Monitor")
+        screenshot = table_cell(row, 10, 12, None, fill, top)
+        text_lines = max(sum(max(1, math.ceil(len(line) / width)) for line in text.splitlines())
+                         for text, width in [(instrument, 24), (item["channel"], 30),
+                                             (publication, 23), (information, 35)])
+        report.row_dimensions[row].height = min(409, max(168, text_lines * 12 + 16,
+                                                       ((picture.height if picture else 0) + 16) * 0.75))
         if picture:
             picture.anchor = OneCellAnchor(
-                _from=AnchorMarker(col=6, row=row, colOff=pixels_to_EMU(12), rowOff=pixels_to_EMU(6)),
+                _from=AnchorMarker(col=9, row=row - 1, colOff=pixels_to_EMU(10), rowOff=pixels_to_EMU(8)),
                 ext=XDRPositiveSize2D(pixels_to_EMU(picture.width), pixels_to_EMU(picture.height)))
             report.add_image(picture)
         else:
-            report.merge_cells(start_row=row + 1, start_column=7, end_row=row + len(fields), end_column=12)
-            placeholder = put(report, row + 1, 7, item["picture_note"] or "Скриншот ещё не получен")
-            placeholder.fill = PatternFill("solid", fgColor=GRAY)
-        row += block_rows + 2
+            screenshot.value = "Скриншот ещё не получен"
+            screenshot.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            screenshot.font = Font(name="Arial", size=10, color="737C88")
+        previous_group = group
+        row += 1
     for row, post_id in summary_links:
         jump(put(report, row, 12, ""), "Отчёт", f"A{anchors[post_id]}", "Открыть посты")
     if not view["records"]:
-        put(report, summary_end + 6, 1, "Публикации за выбранный период ещё не найдены.")
+        report.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        put(report, row, 1, "Публикации за выбранный период ещё не найдены.")
 
     # Keep the machine-readable registry and history alongside the presentation.
-    registry[0] = registry[0] + ["Клиент", "Язык", "Месяц", "Состояние", "Плановое снятие", "Снимок в отчёте"]
+    registry[0] = registry[0] + ["Инструмент", "Язык", "Месяц", "Состояние", "Плановое снятие", "Снимок в отчёте"]
     for index, post in enumerate(filtered_posts, 1):
         item = record_by_id[post["id"]]
-        registry[index] = registry[index] + [item["client"], item["languages"], item["month"], item["state"], None, "Открыть снимок"]
+        registry[index] = registry[index] + [item["client"].replace("Клиент не указан", "Инструмент не указан"), item["languages"], item["month"], item["state"], None, "Открыть снимок"]
         registry[index][5] = "Открыть снимок"
     order = [14, 0, 11, 1, 2, 17, 4, 3, 5, 13, 18, 16, 15, 12, 10, 6, 8, 9]
     registry = [[row[i] for i in order] + ["Доступность проверена" if row_no == 0 else None] for row_no, row in enumerate(registry)]
@@ -208,8 +259,8 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         date_cell(detail, row, 11, item["until"])
         date_cell(detail, row, 19, item["checked"])
         jump(detail.cell(row, 9), "Отчёт", f"A{anchors[post['id']]}", "Открыть снимок")
-    unavailable_headers = ["Клиент", "Канал", "Пост", "Состояние", "Опубликован", "Последняя проверка", "Недоступен с", "Последние просмотры", "Снимок", "Причина"]
-    unavailable_rows = [unavailable_headers] + [[p["client"], p["channel"], p["url"], p["state"], None, None, None, p["views"], "Открыть снимок", p["error"]] for p in view["unavailable"]]
+    unavailable_headers = ["Инструмент", "Площадки", "Пост", "Состояние", "Опубликован", "Последняя проверка", "Недоступен с", "Последние просмотры", "Снимок", "Причина"]
+    unavailable_rows = [unavailable_headers] + [[p["client"].replace("Клиент не указан", "Инструмент не указан"), p["channel"], p["url"], p["state"], None, None, None, p["views"], "Открыть снимок", p["error"]] for p in view["unavailable"]]
     _write_table(unavailable, unavailable_rows)
     for row, item in enumerate(view["unavailable"], 2):
         date_cell(unavailable, row, 5, item["published"])
@@ -227,7 +278,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
             date_cell(history_sheet, row, col, local(value, tz))
         # The report's current shot remains available even if the channel is gone.
         jump(history_sheet.cell(row, 7), "Отчёт", f"A{anchors[post['id']]}", "Текущий снимок")
-    briefs[0] = briefs[0] + ["Клиент", "Язык", "План публикаций"]
+    briefs[0] = briefs[0] + ["Инструмент", "Язык", "План публикаций"]
     flat_briefs = [b for p in partners for b in p.get("placements", [])]
     brief_lookup = {b["id"]: b for b in flat_briefs}
     for row in briefs[1:]:
@@ -248,6 +299,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
                 jump(briefs_sheet.cell(row, 15), "Отчёт", f"A{anchors[linked[0]['id']]}", "Открыть снимки")
     for sheet in (unavailable, detail, history_sheet, briefs_sheet):
         for cell in sheet[1]:
+            cell.value = {"Канал": "Площадки", "Ссылка на канал": "Ссылка на площадку"}.get(cell.value, cell.value)
             cell.fill = PatternFill("solid", fgColor=GRAY)
             cell.font = Font(name="Arial", size=10, bold=True, color=INK)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)

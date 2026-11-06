@@ -121,13 +121,52 @@ class UnifiedReportTests(unittest.TestCase):
                                          (size[0] + size[1]) / 2)
                     if size == (92, 201):
                         self.assertEqual((width, height), size)
-                    next_card = next(cell.row for cell in sheet["A"]
-                                     if isinstance(cell.value, str) and cell.value.startswith("Пост #2"))
+                    link = book["Реестр публикаций"]["I3"].hyperlink.location
+                    next_card = sheet[link.rsplit("!", 1)[1]].row
                     available = sum((sheet.row_dimensions[r].height or sheet.sheet_format.defaultRowHeight) * 4 / 3
                                     for r in range(picture.anchor._from.row + 1, next_card))
-                    self.assertLess(height + 6, available)
+                    self.assertLess(height + 8, available)
                 finally:
                     book.close()
+
+    def test_publication_table_groups_instrument_and_platform_with_matching_images(self):
+        self.partners.append({"id": 2, "title": "Another platform", "username": "partner_two",
+                              "status": "active", "placements": [self.brief(3, "Client A", 3)]})
+        self.posts.extend([
+            dict(self.posts[0], id=3, partner_id=2, message_id=30, placement_ids=[3],
+                 url="https://t.me/partner_two/30", published_at="2026-10-20T10:00:00+00:00"),
+            dict(self.posts[0], id=4, message_id=40, url="https://t.me/partner_one/40",
+                 published_at="2026-10-15T10:00:00+00:00"),
+        ])
+        self.snapshots.append(dict(self.snapshots[0], id=3, post_id=3, screenshot_path=str(self.new)))
+        book = load_workbook(export_xlsx(self.partners, self.posts, self.snapshots, self.root / "out.xlsx"))
+        try:
+            sheet = book["Отчёт"]
+            self.assertEqual((sheet["B8"].value, sheet["C8"].value), ("Инструмент", "Площадки"))
+            rows = {}
+            for row, post in enumerate(self.posts, 2):
+                link = book["Реестр публикаций"].cell(row, 9).hyperlink
+                address = link.location.rsplit("!", 1)[1]
+                data_row = sheet[address].row
+                rows[post["id"]] = data_row
+                self.assertTrue(sheet.cell(data_row, 5).value.startswith(f"Пост #{post['id']}\n"))
+                self.assertEqual(sheet.cell(data_row, 5).hyperlink.target, post["url"])
+                self.assertEqual(sheet.cell(data_row, 1).hyperlink.location, f"'Реестр публикаций'!A{row}")
+            self.assertEqual(sorted(rows, key=rows.get), [3, 4, 1, 2])
+            self.assertEqual(sorted(rows.values()), list(range(min(rows.values()), min(rows.values()) + 4)))
+            self.assertEqual(sheet.cell(rows[1], 1).value, "Client A")
+            self.assertEqual(sheet.cell(rows[3], 3).value, "Another platform")
+            self.assertIn("Просмотры: 99", sheet.cell(rows[1], 7).value)
+            self.assertIn("последний успешный", sheet.cell(rows[1], 7).comment.text)
+            image_rows = {picture.anchor._from.row + 1 for picture in sheet._images}
+            self.assertEqual(image_rows, {rows[1], rows[3]})
+            self.assertEqual(sheet.cell(rows[2], 10).value, "Скриншот ещё не получен")
+            for tab in ("Реестр публикаций", "Недоступные посты", "Партнёры"):
+                self.assertEqual(book[tab]["A1"].value, "Инструмент")
+            for tab in ("Реестр публикаций", "История просмотров", "Партнёры"):
+                self.assertEqual(book[tab].cell(1, 2 if tab != "История просмотров" else 1).value, "Площадки")
+        finally:
+            book.close()
 
     def test_optional_client_plan_and_language_persist_across_restart(self):
         path = self.root / "db.sqlite3"

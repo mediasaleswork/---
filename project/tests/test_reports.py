@@ -45,8 +45,12 @@ class ReportTests(unittest.TestCase):
         registry = book["Реестр публикаций"]
         columns = {cell.value: cell.column for cell in registry[1]}
         self.assertEqual(registry.max_row, 3)  # 31 October UTC is already 1 November in Tashkent.
-        self.assertEqual(registry.cell(2, columns["Канал"]).value, "=BAD()")
-        self.assertEqual(registry.cell(2, columns["Канал"]).data_type, "s")
+        self.assertEqual(registry.cell(2, columns["Площадки"]).value, "=BAD()")
+        self.assertEqual(registry.cell(2, columns["Площадки"]).data_type, "s")
+        for row in book["Отчёт"]:
+            for cell in row:
+                if cell.value == "=BAD()":
+                    self.assertEqual(cell.data_type, "s")
         self.assertEqual(registry.cell(2, columns["Текст"]).data_type, "s")
         self.assertEqual(registry.cell(2, columns["Просмотры"]).value, 1500)
         self.assertIsNone(registry.cell(3, columns["Просмотры"]).value)

@@ -193,7 +193,7 @@ def main(argv=None):
                     links = reporter.sync(*store.dump())
                     for sid, url in links.items():
                         store.execute("UPDATE snapshots SET screenshot_url=? WHERE id=?", (url, int(sid)))
-                    print("Обновлены вкладки отчёта, история, очередь замеров, разбор переписки и недоступные посты.")
+                    print("Обновлён отчёт: сводка, публикации со скриншотами и недоступные посты.")
         return 0
     except KeyboardInterrupt:
         print("\nОстановлено.")

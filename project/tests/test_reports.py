@@ -97,6 +97,7 @@ class ReportTests(unittest.TestCase):
         reporter.spreadsheet_id = "fake-sheet"
         reporter.drive_folder_id = folder
         reporter.timezone = "Asia/Tashkent"
+        reporter.layout = "detailed"  # Retained compatibility mode; runtime defaults to the compact template.
         return reporter
 
     def test_google_only_dedicated_tabs_and_raw_values(self):

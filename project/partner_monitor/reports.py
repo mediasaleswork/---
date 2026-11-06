@@ -1,8 +1,7 @@
-"""Excel reports and an optional, explicitly configured Google Sheets mirror.
+"""Excel presentation and a Google mirror of the approved compact workbook.
 
-Google writes are restricted to dedicated BRB_ tabs. No unrelated report
-sheet or sharing permission is changed. Screenshots remain private to the Drive
-folder's existing audience.
+Compact mode replaces only a separately marked report copy. Legacy detailed
+mode retains its managed BRB_ tabs. Neither mode changes sharing permissions.
 """
 from __future__ import annotations
 
@@ -150,7 +149,8 @@ def _google_tables(partners, posts, snapshots, timezone):
     for group in view["summary"]:
         picture_count = sum(p["id"] in best for p in posts if p["partner_id"] == group["partner_id"]
             and group["client"] in clients_by_post.get(p["id"], set()))
-        if any(p.get("contract_plans") for p in partners if p["id"] == group["partner_id"]):
+        if any(plan["client_name"].casefold() == group["client"].casefold() for p in partners
+               if p["id"] == group["partner_id"] for plan in p.get("contract_plans", [])):
             continue
         summary.append([group["client"],
             group["channel"], group["languages"], group["plan"], group["total"], group["remaining"],
@@ -292,14 +292,14 @@ def export_xlsx(partners: list[dict], posts: list[dict], snapshots: list[dict], 
 
 
 class GoogleReporter:
-    """Mirror data into dedicated tabs, optionally upload screenshots to Drive.
+    """Mirror the compact workbook, optionally upload screenshots to Drive.
 
     credentials_path accepts google-auth service-account or authorized-user JSON.
     A service account must use a Shared Drive folder for uploads (personal Drive
     storage quota is unavailable to service accounts). No public sharing is set.
     """
     def __init__(self, credentials_path: Path, spreadsheet_id: str, drive_folder_id: str | None = None,
-                 timezone: str = "Asia/Tashkent"):
+                 timezone: str = "Asia/Tashkent", layout: str = "compact"):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", spreadsheet_id):
             raise ValueError("Invalid spreadsheet ID")
         if drive_folder_id and not re.fullmatch(r"[A-Za-z0-9_-]+", drive_folder_id):
@@ -308,13 +308,16 @@ class GoogleReporter:
         from google.auth import load_credentials_from_file
         from google.auth.transport.requests import AuthorizedSession
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        if drive_folder_id:
+        if layout not in {"compact", "detailed"}:
+            raise ValueError("Unknown Google report layout")
+        if drive_folder_id or layout == "compact":
             scopes.append("https://www.googleapis.com/auth/drive")
         credentials, _ = load_credentials_from_file(str(credentials_path), scopes=scopes)
         self.session = AuthorizedSession(credentials)
         self.spreadsheet_id = spreadsheet_id
         self.drive_folder_id = drive_folder_id
         self.timezone = timezone
+        self.layout = layout
 
     def _json(self, method: str, url: str, **kwargs) -> dict:
         response = self.session.request(method, url, timeout=60, **kwargs)
@@ -354,6 +357,9 @@ class GoogleReporter:
         return uploaded.get("webViewLink") or f"https://drive.google.com/file/d/{uploaded['id']}/view"
 
     def sync(self, partners: list[dict], posts: list[dict], snapshots: list[dict]) -> dict:
+        if self.layout == "compact":
+            from .google_compact import sync_compact
+            return sync_compact(self, partners, posts, snapshots)
         snapshots = [dict(s) for s in snapshots]
         uploaded = {}
         for snapshot in snapshots:

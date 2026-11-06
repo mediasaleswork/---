@@ -20,10 +20,20 @@ class Config:
     batch_size: int = 200
     default_window_days: int = 7
     realtime_channel_limit: int = 10
-    milestones_hours: tuple[float, ...] = (24, 48, 168)
+    milestones_hours: tuple[float, ...] = (24, 48)
     spreadsheet_id: str = ""
     google_credentials: Path | None = None
     drive_folder_id: str | None = None
+    conversation_mode: bool = False
+    default_client: str = ""
+    allowed_channels: tuple[str, ...] = ()
+    channel_plans: tuple[dict, ...] = ()
+    data_namespace: str = ""
+    test_mode: bool = False
+
+    @property
+    def runtime_dir(self) -> Path:
+        return self.data_dir / self.data_namespace if self.data_namespace else self.data_dir
 
     @property
     def data_dir(self) -> Path:
@@ -31,7 +41,19 @@ class Config:
 
     @property
     def db_path(self) -> Path:
-        return self.data_dir / "monitor.sqlite3"
+        return self.runtime_dir / "monitor.sqlite3"
+
+    def permits(self, ref) -> bool:
+        if not self.allowed_channels:
+            return not self.test_mode
+        key = ref.username.lower() if ref.username else f"c:{ref.private_channel_id}"
+        return key in self.allowed_channels
+
+    def validate_run(self):
+        if self.test_mode and (not self.allowed_channels or not self.data_namespace):
+            raise ValueError("Тест: заполните allowed_channels и отдельный data_namespace")
+        if self.conversation_mode and not self.allowed_channels:
+            raise ValueError("conversation_mode: задайте явный список allowed_channels")
 
     def telegram_credentials(self) -> tuple[int, str]:
         try:
@@ -49,7 +71,7 @@ def load_config(path: Path) -> Config:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("Конфигурация должна быть YAML-объектом")
-    allowed = {"source_group", "keywords", "domains", "timezone", "interval_seconds", "lookback_days", "batch_size", "default_window_days", "realtime_channel_limit", "milestones_hours", "spreadsheet_id", "google_credentials", "drive_folder_id"}
+    allowed = {"source_group", "keywords", "domains", "timezone", "interval_seconds", "lookback_days", "batch_size", "default_window_days", "realtime_channel_limit", "milestones_hours", "spreadsheet_id", "google_credentials", "drive_folder_id", "conversation_mode", "default_client", "allowed_channels", "channel_plans", "data_namespace", "test_mode"}
     unknown = set(data) - allowed
     if unknown:
         raise ValueError("Неизвестные настройки: " + ", ".join(sorted(unknown)))
@@ -71,13 +93,15 @@ def load_config(path: Path) -> Config:
     realtime_limit = data.get("realtime_channel_limit", 10)
     if type(realtime_limit) is not int or not 0 <= realtime_limit <= 10:
         raise ValueError("realtime_channel_limit: целое число от 0 до 10")
-    raw_milestones = data.get("milestones_hours", [24, 48, 168])
+    raw_milestones = data.get("milestones_hours", [24, 48])
     if not isinstance(raw_milestones, list) or any(type(h) not in (int, float) for h in raw_milestones):
         raise ValueError("milestones_hours: ожидается список чисел, например [24, 48, 168]")
     milestones = tuple(sorted(set(float(h) for h in raw_milestones)))
     if any(not 0 < h <= 8760 for h in milestones):
         raise ValueError("milestones_hours: положительные часы, не больше года")
     credentials = data.get("google_credentials")
+    from .scope import read_scope
+    scope = read_scope(data)
     return Config(root=path.parent, source_group=source, keywords=data.get("keywords", []), domains=data.get("domains", []), timezone=timezone, milestones_hours=milestones, realtime_channel_limit=realtime_limit,
                   spreadsheet_id=str(data.get("spreadsheet_id", "")), google_credentials=(path.parent / credentials).resolve() if credentials else None,
-                  drive_folder_id=data.get("drive_folder_id") or None, **numbers)
+                  drive_folder_id=data.get("drive_folder_id") or None, **numbers, **scope)

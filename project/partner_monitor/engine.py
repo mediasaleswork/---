@@ -18,6 +18,8 @@ from .config import Config
 from .parsing import PartnerReference, match_ad, parse_partner_references
 from .storage import Store, utcnow
 from .telegram_access import TelegramAccess
+from .message_content import message_content, search_text, combined_content, matches_placement
+from .measurements import ensure_jobs, ready_jobs, complete_job
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +57,7 @@ class Monitor:
         self._post_locks = WeakValueDictionary()
         self._attempted = set()
         self._capturing = set()
+        self._allowed_origins = None
 
     async def record_post(self, partner, entity, members, reason, placements=()):
         """Persist and capture at discovery, before scanning the next message."""
@@ -65,6 +68,8 @@ class Monitor:
         async with lock:
             target = partner["username"] or f"c/{members[0].peer_id.channel_id}"
             post_id = self.store.save_post(partner["id"], members, reason, target)
+            post = self.store.rows("SELECT * FROM posts WHERE id=?", (post_id,))[0]
+            ensure_jobs(self.store, post, self.config.milestones_hours)
             self.store.execute("UPDATE posts SET last_checked_at=?,unavailable_since=NULL,status='active',last_error=NULL WHERE id=?", (utcnow(), post_id))
             for placement in placements:
                 self.store.execute("INSERT OR IGNORE INTO placement_posts VALUES (?,?)", (placement["id"], post_id))
@@ -74,6 +79,7 @@ class Monitor:
                 self.store.execute("""INSERT INTO snapshots(post_id,due_key,due_at,checked_at,views,screenshot_status)
                   VALUES (?,'initial',?,?,?,'pending')""", (post_id, post["first_seen_at"], utcnow(), getattr(anchor, "views", None)))
                 snapshot = self.store.rows("SELECT * FROM snapshots WHERE post_id=? AND due_key='initial'", (post_id,))[0]
+                complete_job(self.store, post_id, "initial", snapshot["checked_at"])
                 await self.capture_snapshot(partner, post, snapshot)
             self.changed.set()
             return post_id
@@ -88,8 +94,10 @@ class Monitor:
         if not partners:
             return
         messages = [m for m in messages if isinstance(m.peer_id, types.PeerChannel) and m.peer_id.channel_id == channel_id]
-        text = "\n".join((m.message or "") + " " + " ".join(e.url for e in m.entities or [] if isinstance(e, types.MessageEntityTextUrl)) for m in messages)
+        text = search_text(messages)
         for partner in partners:
+            if not self.config.permits(PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id"))):
+                continue
             placements = self.store.rows("SELECT * FROM placements WHERE partner_id=?", (partner["id"],))
             matched = []
             reason = ""
@@ -103,7 +111,7 @@ class Monitor:
                         reason = "direct_link:ссылка из заявки"
                     continue
                 if datetime.fromisoformat(placement["starts_at"]) <= messages[0].date < datetime.fromisoformat(placement["ends_at"]):
-                    match = match_ad(text, json.loads(placement["keywords"]), json.loads(placement["domains"]))
+                    match = matches_placement(messages, placement)
                     if match.matched:
                         matched.append(placement)
                         reason = reason or match.reason
@@ -117,6 +125,7 @@ class Monitor:
                             self.store.execute("UPDATE requested_posts SET done=1 WHERE partner_id=? AND message_id=?", (partner["id"], mid))
 
     async def ingest_group(self):
+        self.config.validate_run()
         if not self.config.source_group:
             raise ValueError("Заполните source_group в config.yaml; команда dialogs покажет ID доступных групп")
         entity = await self.client.get_entity(self.config.source_group)
@@ -129,8 +138,19 @@ class Monitor:
         if not cursor:
             options["offset_date"] = datetime.now(timezone.utc) - timedelta(days=self.config.lookback_days)
         async for message in self.client.iter_messages(entity, **options):
-            text = message.message or ""
-            urls = [e.url for e in message.entities or [] if isinstance(e, types.MessageEntityTextUrl)]
+            cursor_message_id = message.id
+            if self.config.conversation_mode and getattr(message, "grouped_id", None):
+                members = await self.album(entity, message)
+                message = members[0]
+                if self.store.rows("SELECT message_id FROM source_messages WHERE source_chat_id=? AND message_id=?",
+                                   (str(utils.get_peer_id(entity)), message.id)):
+                    self.store.set_state(key, cursor_message_id)
+                    continue
+                content = combined_content(members)
+            else:
+                content = message_content(message)
+            text = content.text
+            urls = content.urls
             refs = parse_partner_references(text, urls)
             document = getattr(message, "document", None)
             if document:
@@ -153,13 +173,22 @@ class Monitor:
                         raise
                     except (OSError, ValueError) as exc:
                         self.store.add_review(entity.id, message.id, name, f"Документ не удалось прочитать ({type(exc).__name__}); требуется явная Telegram-ссылка")
-                elif not refs:
+                elif not refs and not self.config.conversation_mode:
                     self.store.add_review(entity.id, message.id, name or "вложение", "Формат вложения не поддерживается; пришлите текст условий и ссылку на канал")
             forwarded = getattr(message, "fwd_from", None)
             from_id = getattr(forwarded, "from_id", None)
             if isinstance(from_id, types.PeerChannel):
                 try:
-                    origin = await self.client.get_entity(from_id)
+                    if self.config.allowed_channels:
+                        if self._allowed_origins is None:
+                            self._allowed_origins = {}
+                            for name in self.config.allowed_channels:
+                                origin = await self.client.get_entity(name)
+                                if isinstance(origin, types.Channel) and origin.broadcast:
+                                    self._allowed_origins[origin.id] = origin
+                        origin = self._allowed_origins.get(from_id.channel_id)
+                    else:
+                        origin = await self.client.get_entity(from_id)
                     if getattr(origin, "broadcast", False):
                         username = getattr(origin, "username", None)
                         original_id = getattr(forwarded, "channel_post", None)
@@ -171,13 +200,20 @@ class Monitor:
                     raise
                 except (ValueError, errors.RPCError):
                     log.warning("Не удалось определить источник пересланного сообщения %s; явные ссылки всё равно обработаны", message.id)
-            if refs:
+            refs = [ref for ref in refs if self.config.permits(ref)]
+            if self.config.conversation_mode:
+                from .intake import ConversationIntake
+                # Include extracted document text as well as rich/ordinary text.
+                from dataclasses import replace
+                ConversationIntake(self.store, self.config).consume(utils.get_peer_id(entity), message,
+                    replace(content, text=text), refs)
+            elif refs:
                 self.store.register_brief(refs, text, utils.get_peer_id(entity), message.id, message.date, self.config)
             elif getattr(message, "photo", None):
                 self.store.add_review(entity.id, message.id, "изображение", "Нужен текст с названием рекламы, ссылкой на канал и длительностью; OCR не подключён")
-            if not refs and not document and re.search(r"партн[её]р|hamkor", text, re.IGNORECASE):
+            if not self.config.conversation_mode and not refs and not document and re.search(r"партн[её]р|hamkor", text, re.IGNORECASE):
                 self.store.add_review(entity.id, message.id, f"сообщение №{message.id}", "Партнёр упомянут без ссылки на Telegram-канал; требуется уточнение")
-            self.store.set_state(key, message.id)
+            self.store.set_state(key, cursor_message_id)
 
     async def album(self, entity, message) -> list:
         if not getattr(message, "grouped_id", None):
@@ -210,7 +246,7 @@ class Monitor:
                 if key not in seen:
                     seen.add(key)
                     members = await self.album(entity, message)
-                    text = "\n".join((m.message or "") + " " + " ".join(e.url for e in m.entities or [] if isinstance(e, types.MessageEntityTextUrl)) for m in members)
+                    text = search_text(members)
                     match = match_ad(text, self.config.keywords, self.config.domains)
                     if match.matched:
                         await self.record_post(partner, entity, members, match.reason)
@@ -257,11 +293,11 @@ class Monitor:
                     seen.add(key)
                     members = await self.album(entity, message)
                     published = members[0].date
-                    text = "\n".join((m.message or "") + " " + " ".join(e.url for e in m.entities or [] if isinstance(e, types.MessageEntityTextUrl)) for m in members)
+                    text = search_text(members)
                     for placement in searches:
                         if not datetime.fromisoformat(placement["starts_at"]) <= published < datetime.fromisoformat(placement["ends_at"]):
                             continue
-                        match = match_ad(text, json.loads(placement["keywords"]), json.loads(placement["domains"]))
+                        match = matches_placement(members, placement)
                         if match.matched:
                             # Reuse the already fetched album.
                             await self.record_post(partner, entity, members, match.reason, [placement])
@@ -298,8 +334,10 @@ class Monitor:
 
     async def measure(self, partner: dict, entity):
         for post in self.store.rows("SELECT * FROM posts WHERE partner_id=?", (partner["id"],)):
+            ensure_jobs(self.store, post, self.config.milestones_hours)
             existing = self.store.rows("SELECT * FROM snapshots WHERE post_id=?", (post["id"],))
-            due = due_milestones(post, existing, self.config.milestones_hours, datetime.now(timezone.utc))
+            jobs = ready_jobs(self.store, post["id"], datetime.now(timezone.utc))
+            due = [(j["due_key"], j["due_at"]) for j in jobs]
             now = datetime.now(timezone.utc)
             placements = self.store.rows("""SELECT p.* FROM placements p JOIN placement_posts x ON x.placement_id=p.id
               WHERE x.post_id=? AND p.retention_hours IS NOT NULL AND p.status!='dismissed'""", (post["id"],))
@@ -312,34 +350,48 @@ class Monitor:
                     if until <= now and datetime.fromisoformat(post["first_seen_at"]) < until:
                         due.append((key, until.isoformat()))
             retries = [s for s in existing if not s["screenshot_path"] and s["capture_attempts"] < 3 and s["id"] not in self._attempted and s["id"] not in self._capturing]
-            if not due and not retries and not retention_active:
-                continue
+            # Availability continues to be checked after 48h; it never removes
+            # a previously counted placement or its last successful evidence.
             messages = await self.client.get_messages(entity, ids=json.loads(post["message_ids"]))
             available = [m for m in messages if isinstance(m, types.Message)]
             if len(available) != len(json.loads(post["message_ids"])):
                 checked = utcnow()
-                self.store.execute("UPDATE posts SET status='unavailable',last_checked_at=?,unavailable_since=COALESCE(unavailable_since,?),last_error=? WHERE id=?", (checked, checked, "Не удалось получить все сообщения публикации; удаление не подтверждено", post["id"]))
+                self.store.execute("""UPDATE posts SET status=CASE WHEN status='deleted' THEN 'deleted' ELSE 'unavailable' END,
+                  last_checked_at=?,unavailable_since=COALESCE(unavailable_since,?),
+                  last_error=CASE WHEN status='deleted' THEN last_error ELSE ? END WHERE id=?""",
+                  (checked, checked, "Не удалось получить все сообщения публикации; удаление не подтверждено", post["id"]))
+                for job in jobs:
+                    complete_job(self.store, post["id"], job["due_key"], checked,
+                                 "Пост недоступен при контрольной проверке; предыдущий снимок сохранён")
                 continue
             available.sort(key=lambda m: m.id)
-            self.store.execute("UPDATE posts SET status='active',last_checked_at=?,unavailable_since=NULL,last_error=NULL,text=? WHERE id=?", (utcnow(), "\n".join(m.message or "" for m in available).strip(), post["id"]))
+            self.store.execute("UPDATE posts SET status='active',last_checked_at=?,unavailable_since=NULL,last_error=NULL,text=? WHERE id=?", (utcnow(), combined_content(available).text, post["id"]))
             # get_messages reads stored counters, without incrementing them via GetMessagesViews.
             views = getattr(available[0], "views", None)
             for key, due_at in due:
                 self.store.execute("""INSERT OR IGNORE INTO snapshots(post_id,due_key,due_at,checked_at,views,screenshot_status)
                   VALUES (?,?,?,?,?,'pending')""", (post["id"], key, due_at, utcnow(), views))
                 snapshot = self.store.rows("SELECT * FROM snapshots WHERE post_id=? AND due_key=?", (post["id"], key))[0]
+                complete_job(self.store, post["id"], key, snapshot["checked_at"])
                 await self.capture_snapshot(partner, post, snapshot)
             for snapshot in retries:
                 await self.capture_snapshot(partner, post, snapshot)
 
     async def tick(self):
         self._attempted.clear()
+        self.config.validate_run()
+        self.store.configure_plans(self.config)
         await self.ingest_group()
         for partner in self.store.rows("SELECT * FROM partners WHERE status NOT IN ('ignored','needs_review')"):
+            scope_ref = PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id"))
+            if not self.config.permits(scope_ref):
+                continue
             try:
                 # Never resolve or read an ambiguous brief until the operator
                 # has supplied the missing details locally.
                 placements = self.store.rows("SELECT status FROM placements WHERE partner_id=?", (partner["id"],))
+                if self.config.conversation_mode and not placements and not self.store.rows("SELECT id FROM posts WHERE partner_id=?", (partner["id"],)):
+                    continue
                 if placements and all(p["status"] in {"needs_review", "dismissed", "not_found"} for p in placements) and not self.store.rows("SELECT id FROM posts WHERE partner_id=?", (partner["id"],)):
                     continue
                 await asyncio.sleep(1)
@@ -379,7 +431,7 @@ class Monitor:
 
 async def publish_reports(config, store):
     from .reports import export_xlsx
-    await asyncio.to_thread(export_xlsx, *store.dump(), config.data_dir / "report.xlsx", timezone=config.timezone)
+    await asyncio.to_thread(export_xlsx, *store.dump(), config.runtime_dir / "report.xlsx", timezone=config.timezone)
     if config.google_credentials and config.spreadsheet_id:
         try:
             from .reports import GoogleReporter
@@ -404,14 +456,14 @@ async def report_loop(monitor):
 
 
 async def run(config: Config, *, once: bool = False):
-
+    config.validate_run()
     client = client_for(config)
     await client.connect()
     try:
         if not await client.is_user_authorized():
             raise ValueError("Сначала выполните partner-monitor login на своём компьютере или сервере")
         with Store(config.db_path) as store:
-            async with Screenshotter(config.data_dir / "screenshots") as capture:
+            async with Screenshotter(config.runtime_dir / "screenshots") as capture:
                 monitor = Monitor(config, store, client, capture)
                 from .realtime import Realtime
                 realtime = Realtime(monitor)
@@ -428,7 +480,7 @@ async def run(config: Config, *, once: bool = False):
                             monitor.changed.set()
                             if once:
                                 await publish_reports(config, store)
-                            log.info("Цикл завершён. Отчёт: %s", config.data_dir / "report.xlsx")
+                            log.info("Цикл завершён. Отчёт: %s", config.runtime_dir / "report.xlsx")
                         except errors.FloodWaitError as exc:
                             delay = max(delay, exc.seconds + 1)
                             log.warning("Telegram запросил паузу %s секунд; продолжим после неё", exc.seconds)

@@ -42,11 +42,15 @@ class Realtime:
     def start(self):
         self.raw.add_event_handler(self.new_message, events.NewMessage())
         self.raw.add_event_handler(self.album, events.Album())
+        self.raw.add_event_handler(self.deleted, events.MessageDeleted())
         self.monitor.on_channel = self.register_channel
 
     def watching(self, partner_id):
-        partner = self.monitor.store.rows("SELECT status FROM partners WHERE id=?", (partner_id,))
+        from .parsing import PartnerReference
+        partner = self.monitor.store.rows("SELECT * FROM partners WHERE id=?", (partner_id,))
         if not partner or partner[0]["status"] != "active":
+            return False
+        if not self.monitor.config.permits(PartnerReference(partner[0]["username"], private_channel_id=partner[0].get("private_channel_id"))):
             return False
         rows = self.monitor.store.rows("SELECT * FROM placements WHERE partner_id=?", (partner_id,))
         if not rows:
@@ -129,6 +133,35 @@ class Realtime:
     async def album(self, event):
         await self._event(event.messages)
 
+    async def deleted(self, event):
+        from .parsing import PartnerReference
+        from .storage import utcnow
+        import json
+        if self.closed or not getattr(event, "chat_id", None):
+            return
+        # Telegram does not always identify the chat of deleted messages. Only
+        # channel-scoped updates can confirm deletion of our exact publication.
+        peer = event.chat_id
+        for partner in self.monitor.store.rows("SELECT * FROM partners WHERE channel_id IS NOT NULL"):
+            if utils.get_peer_id(types.PeerChannel(partner["channel_id"])) != peer:
+                continue
+            if not self.monitor.config.permits(PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id"))):
+                continue
+            for post in self.monitor.store.rows("SELECT * FROM posts WHERE partner_id=?", (partner["id"],)):
+                if set(json.loads(post["message_ids"])).intersection(event.deleted_ids):
+                    checked = utcnow()
+                    self.monitor.store.execute("""UPDATE posts SET status='deleted',last_checked_at=?,
+                      unavailable_since=COALESCE(unavailable_since,?),last_error=? WHERE id=?""",
+                      (checked, checked, "Удаление сообщения подтверждено обновлением Telegram; выход остаётся засчитанным", post["id"]))
+                    self.monitor.changed.set()
+
+    async def deliver_deletions(self, updates):
+        for update in updates or []:
+            if isinstance(update, types.UpdateDeleteChannelMessages):
+                event = events.MessageDeleted.build(update, None, None)
+                if event is not None:
+                    await self.deleted(event)
+
     async def poll_channel(self, partner_id, entity):
         key = f"realtime_pts:{entity.id}"
         store = self.monitor.store
@@ -148,6 +181,7 @@ class Realtime:
                 if not isinstance(next_pts, int) or next_pts <= 0:
                     raise ValueError("Telegram не предоставил следующий PTS")
                 await self.deliver(messages, expand_albums=True)
+                await self.deliver_deletions(getattr(result, "other_updates", []))
                 # Commit only after every message has been processed. A live
                 # event never advances this PTS or the separate history cursor.
                 store.set_state(key, next_pts)
@@ -180,6 +214,7 @@ class Realtime:
         self.monitor.on_channel = None
         self.raw.remove_event_handler(self.new_message)
         self.raw.remove_event_handler(self.album)
+        self.raw.remove_event_handler(self.deleted)
         jobs = list(self.tasks.values()) + list(self.handlers)
         for task in jobs:
             task.cancel()

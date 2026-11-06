@@ -66,6 +66,11 @@ def _fields(text: str) -> dict[str, str]:
         line = re.sub(r"^\s*[-•*]\s*", "", line).strip()
         match = re.match(r"^([^:\t]{2,40})(?::|\t)\s*(.*)$", line)
         key = (match[1] if match else line.rstrip(":")).strip().casefold().replace("ё", "е")
+        # An advertising disclosure is not a field heading. In particular,
+        # "Реклама\n@channel_footer" must not name the product after the footer.
+        if key == "реклама" and not match:
+            pending = None
+            continue
         if key in _FIELDS:
             value = match[2].strip() if match else ""
             if value:

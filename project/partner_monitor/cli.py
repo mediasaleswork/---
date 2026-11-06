@@ -163,7 +163,7 @@ def main(argv=None):
                     if not rows:
                         raise ValueError("Заявка не найдена")
                     row = rows[0]
-                    if not json.loads(row["direct_ids"]) and not (args.keyword or args.domain or json.loads(row["keywords"]) or json.loads(row["domains"])):
+                    if not json.loads(row["direct_ids"]) and not (args.keyword or args.domain or json.loads(row["keywords"]) or json.loads(row["domains"]) or json.loads(row.get("media_keys") or "[]")):
                         raise ValueError("Укажите --keyword или --domain для поиска рекламы")
                     store.resolve_placement(args.id, start=parse_time(args.start, config.timezone).isoformat(),
                         end=parse_time(args.end, config.timezone).isoformat(), keywords=args.keyword,
@@ -176,7 +176,7 @@ def main(argv=None):
                     print(f"Заявка {args.id} отклонена.")
                 elif args.command == "export":
                     from .reports import export_xlsx
-                    path = export_xlsx(*store.dump(), args.output or config.data_dir / "report.xlsx", timezone=config.timezone, month=args.month)
+                    path = export_xlsx(*store.dump(), args.output or config.runtime_dir / "report.xlsx", timezone=config.timezone, month=args.month)
                     print(path)
                 elif args.command == "status":
                     partners, posts, snapshots = store.dump()
@@ -193,7 +193,7 @@ def main(argv=None):
                     links = reporter.sync(*store.dump())
                     for sid, url in links.items():
                         store.execute("UPDATE snapshots SET screenshot_url=? WHERE id=?", (url, int(sid)))
-                    print("Обновлены вкладки BRB_Публикации, BRB_История, BRB_Партнёры.")
+                    print("Обновлены вкладки отчёта, история, очередь замеров, разбор переписки и недоступные посты.")
         return 0
     except KeyboardInterrupt:
         print("\nОстановлено.")

@@ -54,6 +54,28 @@ class Store(AbstractContextManager):
           placement_id INTEGER NOT NULL REFERENCES placements(id),
           post_id INTEGER NOT NULL REFERENCES posts(id),
           PRIMARY KEY(placement_id,post_id));
+        CREATE TABLE IF NOT EXISTS measurement_jobs (
+          post_id INTEGER NOT NULL REFERENCES posts(id), due_key TEXT NOT NULL,
+          due_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+          checked_at TEXT, last_error TEXT, PRIMARY KEY(post_id,due_key));
+        CREATE TABLE IF NOT EXISTS contract_plans (
+          id INTEGER PRIMARY KEY, contract_key TEXT NOT NULL, client_name TEXT NOT NULL,
+          partner_id INTEGER NOT NULL REFERENCES partners(id), title TEXT NOT NULL,
+          language TEXT NOT NULL, planned_posts INTEGER NOT NULL,
+          baseline_count INTEGER NOT NULL DEFAULT 0, baseline_urls TEXT NOT NULL DEFAULT '[]',
+          UNIQUE(contract_key,partner_id));
+        CREATE TABLE IF NOT EXISTS intake_drafts (
+          id INTEGER PRIMARY KEY, source_chat_id TEXT NOT NULL, anchor_id INTEGER NOT NULL,
+          name TEXT NOT NULL, client_name TEXT NOT NULL, language TEXT NOT NULL DEFAULT '',
+          creative_text TEXT NOT NULL DEFAULT '', media_keys TEXT NOT NULL DEFAULT '[]',
+          target_refs TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'draft',
+          review_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(source_chat_id,anchor_id));
+        CREATE TABLE IF NOT EXISTS source_messages (
+          source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, draft_id INTEGER,
+          text TEXT NOT NULL, media_keys TEXT NOT NULL, targets TEXT NOT NULL,
+          kind TEXT NOT NULL, review_reason TEXT, received_at TEXT NOT NULL,
+          PRIMARY KEY(source_chat_id,message_id));
         """)
         # Compatible with databases created by early versions of the MVP.
         if "channel_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(partners)")}:
@@ -61,8 +83,10 @@ class Store(AbstractContextManager):
         if "private_channel_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(partners)")}:
             self.execute("ALTER TABLE partners ADD COLUMN private_channel_id INTEGER")
         for table, additions in {
-            "placements": {"client_name": "TEXT NOT NULL DEFAULT ''", "language": "TEXT NOT NULL DEFAULT ''", "planned_posts": "INTEGER"},
+            "placements": {"client_name": "TEXT NOT NULL DEFAULT ''", "language": "TEXT NOT NULL DEFAULT ''", "planned_posts": "INTEGER",
+                           "media_keys": "TEXT NOT NULL DEFAULT '[]'", "draft_id": "INTEGER", "contract_key": "TEXT NOT NULL DEFAULT ''"},
             "posts": {"last_checked_at": "TEXT", "unavailable_since": "TEXT"},
+            "contract_plans": {"baseline_until": "TEXT"},
         }.items():
             existing = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
             for name, declaration in additions.items():
@@ -144,7 +168,8 @@ class Store(AbstractContextManager):
         messages = sorted(messages, key=lambda m: m.id)
         anchor = messages[0]
         album_key = f"g:{anchor.grouped_id}" if getattr(anchor, "grouped_id", None) else f"m:{anchor.id}"
-        text = "\n".join(m.message or "" for m in messages).strip()
+        from .message_content import combined_content
+        text = combined_content(messages).text
         ids = json.dumps([m.id for m in messages])
         self.execute("""INSERT INTO posts(partner_id,album_key,message_id,message_ids,url,published_at,first_seen_at,text,match_reason)
           VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(partner_id,album_key) DO UPDATE SET
@@ -162,11 +187,35 @@ class Store(AbstractContextManager):
     def dump(self) -> tuple[list[dict], list[dict], list[dict]]:
         partners = self.rows("SELECT * FROM partners ORDER BY id")
         for partner in partners:
+            partner["contract_plans"] = self.rows("SELECT * FROM contract_plans WHERE partner_id=? ORDER BY id", (partner["id"],))
+            # Intake diagnostics travel through the existing report API without
+            # changing its three-list signature. Only the first partner owns it.
+            partner["intake"] = []
             partner["placements"] = self.rows("SELECT * FROM placements WHERE partner_id=? ORDER BY id", (partner["id"],))
             for placement in partner["placements"]:
                 placement["post_urls"] = [r["url"] for r in self.rows("SELECT p.url FROM posts p JOIN placement_posts x ON x.post_id=p.id WHERE x.placement_id=?", (placement["id"],))]
         posts = self.rows("SELECT * FROM posts ORDER BY published_at,id")
         for post in posts:
+            post["measurement_jobs"] = self.rows("SELECT * FROM measurement_jobs WHERE post_id=? ORDER BY due_at", (post["id"],))
             post["placement_ids"] = [r["placement_id"] for r in self.rows("SELECT placement_id FROM placement_posts WHERE post_id=?", (post["id"],))]
+        if partners:
+            partners[0]["intake"] = self.rows("""SELECT s.*,d.name AS draft_name,d.client_name FROM source_messages s
+              LEFT JOIN intake_drafts d ON d.id=s.draft_id WHERE s.kind!='ignored' ORDER BY received_at,message_id""")
         return (partners, posts,
                 self.rows("SELECT * FROM snapshots ORDER BY checked_at,id"))
+
+    def configure_plans(self, config):
+        from .scope import channel_ref
+        for plan in config.channel_plans:
+            ref = channel_ref(plan["channel"])
+            if not config.permits(ref):
+                continue
+            pid = self.add_partner(ref, "contract", 0, enqueue=False)
+            self.execute("""INSERT INTO contract_plans(contract_key,client_name,partner_id,title,language,
+              planned_posts,baseline_count,baseline_urls,baseline_until) VALUES (?,?,?,?,?,?,?,?,?)
+              ON CONFLICT(contract_key,partner_id) DO UPDATE SET client_name=excluded.client_name,
+              title=excluded.title,language=excluded.language,planned_posts=excluded.planned_posts,
+              baseline_count=excluded.baseline_count,baseline_urls=excluded.baseline_urls,baseline_until=excluded.baseline_until""",
+              (plan["contract"], plan["client"], pid, plan.get("title") or ref.username,
+               plan.get("language", ""), plan["planned_posts"], plan.get("baseline_count", 0),
+               json.dumps(plan.get("baseline_urls", [])), plan.get("baseline_until")))

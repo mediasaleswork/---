@@ -50,6 +50,28 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "realtime_channel_limit"):
                 self.load("realtime_channel_limit: " + value + "\n")
 
+    def test_test_scope_requires_channel_and_separate_database_before_run(self):
+        for content in ("test_mode: true\n", "test_mode: true\nallowed_channels: [partner_one]\n"):
+            with self.subTest(content=content), self.assertRaisesRegex(ValueError, "Тест"):
+                self.load(content).validate_run()
+        config = self.load("test_mode: true\nallowed_channels: ['https://t.me/partner_one']\ndata_namespace: test\n")
+        config.validate_run()
+        self.assertEqual(config.allowed_channels, ("partner_one",))
+        self.assertEqual(config.db_path, self.path.parent / "data" / "test" / "monitor.sqlite3")
+
+    def test_namespace_and_channel_scope_cannot_be_arbitrary_paths_or_posts(self):
+        for content in ("data_namespace: ../live\n", "allowed_channels: [https://t.me/partner_one/7]\n",
+                        "test_mode: 'true'\n", "channel_plans: wrong\n"):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                self.load(content)
+
+    def test_incomplete_historical_baseline_requires_explicit_cutoff(self):
+        text = "channel_plans:\n  - contract: test\n    client: Example\n    channel: partner_one\n    planned_posts: 10\n    baseline_count: 3\n"
+        with self.assertRaisesRegex(ValueError, "baseline_until"):
+            self.load(text)
+        config = self.load(text + "    baseline_until: '2026-11-06T00:00:00+05:00'\n")
+        self.assertEqual(config.channel_plans[0]["baseline_until"], "2026-11-05T19:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

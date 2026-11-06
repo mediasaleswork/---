@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from openpyxl import load_workbook
 from PIL import Image
 
-from partner_monitor.reports import GoogleReporter, TABS, _google_value, export_xlsx
+from partner_monitor.reports import GoogleReporter, TABS, _google_value, _google_tables, export_xlsx
 
 
 class ReportTests(unittest.TestCase):
@@ -112,7 +112,7 @@ class ReportTests(unittest.TestCase):
         reporter._json = request
         self.assertEqual(reporter.sync(self.partners, self.posts, self.snapshots), {})
         creates = next(c for c in calls if c[1].endswith(":batchUpdate") and "/values" not in c[1])
-        self.assertEqual([r["addSheet"]["properties"]["title"] for r in creates[2]["json"]["requests"]], list(TABS))
+        self.assertEqual([r["addSheet"]["properties"]["title"] for r in creates[2]["json"]["requests"] if "addSheet" in r], list(TABS))
         write = next(c for c in calls if c[1].endswith("/values:batchUpdate"))
         self.assertEqual(write[2]["json"]["valueInputOption"], "RAW")
         self.assertEqual(write[2]["json"]["data"][0]["values"][1][0], "=BAD()")
@@ -153,7 +153,56 @@ class ReportTests(unittest.TestCase):
         reporter.sync([], [], [])
         self.assertTrue(requests[-2][1].endswith("/values:batchUpdate"))
         self.assertTrue(requests[-1][1].endswith("/values:batchClear"))
-        self.assertEqual(requests[-1][2]["json"]["ranges"][0], "'BRB_Публикации'!A2:N1000")
+        self.assertEqual(requests[-1][2]["json"]["ranges"][0], "'BRB_Публикации'!A2:V1000")
+
+    def test_google_has_instrument_plan_summary_and_last_successful_drive_evidence(self):
+        self.partners[0]["placements"] = [
+            {"id": 101, "name": "Product One", "client_name": "Instrument One", "language": "UZ", "planned_posts": 10,
+             "ad_type": "пост", "retention_hours": 24, "terms": "24 часа", "starts_at": "2026-10-31T00:00:00+00:00",
+             "ends_at": "2026-11-10T00:00:00+00:00", "status": "found", "source_text": "Original brief"},
+            {"id": 102, "name": "Product Two", "client_name": "Instrument Two", "language": "RU", "planned_posts": 2,
+             "ad_type": "пост", "retention_hours": None, "terms": "", "starts_at": "2026-10-31T00:00:00+00:00",
+             "ends_at": "2026-11-10T00:00:00+00:00", "status": "found", "source_text": "Original second brief"},
+        ]
+        self.posts[0]["placement_ids"] = [101]
+        self.posts[1]["placement_ids"] = [102]
+        self.snapshots[0]["screenshot_url"] = "https://drive.google.com/file/d/evidence/view"
+        self.png.unlink()  # Drive evidence survives removal of the server-local file.
+        publications, history, briefs, summary, *_ = _google_tables(self.partners, self.posts, self.snapshots, "Asia/Tashkent")
+        self.assertEqual(publications[1][5], self.snapshots[0]["screenshot_url"])
+        self.assertEqual(publications[1][14:16], ["Instrument One", "UZ"])
+        self.assertIsInstance(publications[1][2], float)
+        self.assertEqual(publications[1][20:22], ["error", "network"])
+        self.assertEqual(history[1][-2:], ["Instrument One", "UZ"])
+        by_client = {row[0]: row for row in summary[1:]}
+        self.assertEqual(by_client["Instrument One"][3:6], [10, 1, 9])
+        self.assertEqual(by_client["Instrument One"][8], 1)
+        self.assertEqual(by_client["Instrument Two"][3:6], [2, 1, 1])
+        self.assertEqual(by_client["Instrument Two"][8], 0)
+        self.assertEqual(briefs[1][-3:], ["Instrument One", "UZ", 10])
+        self.assertEqual(briefs[1][19], self.snapshots[0]["screenshot_url"])
+
+    def test_google_unknown_plan_is_blank_and_local_dates_are_sortable(self):
+        tables = _google_tables(self.partners, self.posts, self.snapshots, "Asia/Tashkent")
+        self.assertIsNone(tables[3][1][3])
+        self.assertIsNone(tables[3][1][5])
+        self.assertEqual(tables[0][1][2], (datetime(2026, 11, 1, 1) - datetime(1899, 12, 30)).total_seconds() / 86400)
+
+    def test_google_numeric_dates_receive_native_date_formats(self):
+        reporter = self.reporter()
+        calls = []
+        def request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return {"sheets": []} if method == "GET" else {}
+        reporter._json = request
+        reporter.sync(self.partners, self.posts, self.snapshots)
+        batch = next(kwargs['json']['requests'] for method, url, kwargs in calls if url.endswith(':batchUpdate') and '/values' not in url)
+        formats = [r['repeatCell'] for r in batch if 'repeatCell' in r and r['repeatCell']['fields'] == 'userEnteredFormat.numberFormat']
+        self.assertTrue(any(r['range']['startColumnIndex'] == 2 for r in formats))
+        self.assertTrue(all(r['cell']['userEnteredFormat']['numberFormat']['type'] == 'DATE_TIME' for r in formats))
+        writes = next(kwargs['json']['data'] for method, url, kwargs in calls if url.endswith('/values:batchUpdate'))
+        self.assertEqual(len(writes), len(TABS))
+        self.assertTrue(all(len(row) == len(writes[0]['values'][0]) for row in writes[0]['values']))
 
 
 if __name__ == "__main__":

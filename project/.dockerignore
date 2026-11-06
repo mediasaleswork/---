@@ -6,6 +6,7 @@
 **/.env
 **/.env.*
 config.yaml
+config.test.yaml
 data
 secrets
 **/*.session*

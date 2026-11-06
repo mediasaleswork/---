@@ -1,6 +1,6 @@
 """Excel reports and an optional, explicitly configured Google Sheets mirror.
 
-Google writes are restricted to three dedicated BRB_ tabs. No existing report
+Google writes are restricted to dedicated BRB_ tabs. No unrelated report
 sheet or sharing permission is changed. Screenshots remain private to the Drive
 folder's existing audience.
 """
@@ -31,7 +31,14 @@ PARTNER_HEADERS = ["Канал", "Ссылка на канал", "Статус",
                    "Тип рекламы", "Длительность, ч", "Условия", "Публикация от", "Публикация до",
                    "Состояние заявки", "Требуется уточнить", "Период по умолчанию", "Найденные посты", "Исходное сообщение", "Исходный текст",
                    "Последние просмотры", "Проверено", "Скриншоты", "Контроль длительности"]
-TABS = ("BRB_Публикации", "BRB_История", "BRB_Партнёры")
+TABS = ("BRB_Публикации", "BRB_История", "BRB_Партнёры", "BRB_Сводка", "BRB_Задания", "BRB_Разбор", "BRB_Недоступные")
+SUMMARY_HEADERS = ["Клиент", "Инструмент", "Язык", "План", "Отработали",
+                   "Остаток", "Выходов в базе", "Недоступны сейчас",
+                   "Со скриншотом", "Последний выход", "Площадки", "Договор", "Учтено до запуска"]
+JOB_HEADERS = ["Инструмент", "Ссылка на пост", "Контрольная точка", "Проверка запланирована на",
+               "Состояние замера", "Фактическое время замера", "Примечание", "Просмотры", "Скриншот", "Состояние снимка"]
+INTAKE_HEADERS = ["№ сообщения", "Реклама", "Клиент", "Этап", "Текст", "Требуется уточнить", "Получено"]
+GOOGLE_DATE_COLUMNS = ((2, 3, 18, 19), (2, 3, 9, 10), (9, 10), (9,), (3, 5), (6,), (2, 3, 18, 19))
 
 
 def _datetime(value: str | datetime | None) -> datetime | None:
@@ -72,6 +79,110 @@ def _google_value(value):
         # code units is safe for both BMP text and emoji (surrogate pairs).
         return value.encode("utf-16-le", errors="replace")[:100000].decode("utf-16-le", errors="ignore")
     return value
+
+
+def _google_date(value, timezone):
+    """Sheets serial number in the report's timezone; naive values are local."""
+    if not value:
+        return ""
+    date = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if date.tzinfo is not None:
+        date = date.astimezone(ZoneInfo(timezone)).replace(tzinfo=None)
+    return (date - datetime(1899, 12, 30)).total_seconds() / 86400
+
+
+def _google_tables(partners, posts, snapshots, timezone):
+    from .report_view import build_view
+
+    publications, history, briefs, by_post = _tables(partners, posts, snapshots, timezone)
+    view = build_view(partners, posts, snapshots, timezone)
+    record_by_id = {row["id"]: row for row in view["records"]}
+    brief_by_id = {b["id"]: b for p in partners for b in p.get("placements", [])}
+    best = {}
+    for snapshot in _ordered(snapshots):
+        if snapshot.get("screenshot_url") and snapshot.get("screenshot_status") not in {
+                "error", "failed", "invalid", "unavailable", "pending"}:
+            best[snapshot["post_id"]] = snapshot
+    clients_by_post = {}
+    publications[0] = publications[0] + ["Клиент", "Язык", "Месяц", "Состояние",
+        "Плановое снятие", "Скриншот сделан", "Статус последнего снимка", "Ошибка последнего снимка"]
+    publications[0][0] = "Инструмент"
+    for row, post in zip(publications[1:], posts):
+        record = record_by_id[post["id"]]
+        checks = by_post[post["id"]]
+        latest = checks[-1] if checks else {}
+        picture = best.get(post["id"], {})
+        linked = [brief_by_id[i] for i in post.get("placement_ids", []) if i in brief_by_id]
+        clients_by_post[post["id"]] = {b.get("client_name") or "Клиент не указан" for b in linked} or {"Клиент не указан"}
+        row[2] = _google_date(post.get("published_at"), timezone)
+        row[3] = _google_date(post.get("last_checked_at") or latest.get("checked_at"), timezone)
+        row[5] = picture.get("screenshot_url", "")
+        row.extend([record["client"],
+                    record["languages"], record["month"], record["state"],
+                    _google_date(record["until"], timezone),
+                    _google_date(picture.get("screenshot_at") or picture.get("checked_at"), timezone),
+                    latest.get("screenshot_status", ""), latest.get("screenshot_error") or ""])
+    history[0] = history[0] + ["Клиент", "Язык"]
+    history[0][0] = "Инструмент"
+    valid_snapshots = [s for s in _ordered(snapshots) if s["post_id"] in record_by_id]
+    post_by_id = {p["id"]: p for p in posts}
+    for row, snapshot in zip(history[1:], valid_snapshots):
+        post = post_by_id[snapshot["post_id"]]
+        record = record_by_id[post["id"]]
+        for index, value in ((2, post.get("published_at")), (3, snapshot.get("checked_at")),
+                             (9, snapshot.get("due_at")), (10, snapshot.get("screenshot_at"))):
+            row[index] = _google_date(value, timezone)
+        row.extend([record["client"], record["languages"]])
+    briefs[0] = briefs[0] + ["Клиент", "Язык", "План заявки"]
+    briefs[0][0] = "Инструмент"
+    briefs[0][1] = "Площадки"
+    for row in briefs[1:]:
+        row.extend([""] * (len(PARTNER_HEADERS) - len(row)))
+        brief = brief_by_id.get(row[4])
+        if brief:
+            row[9] = _google_date(brief.get("starts_at"), timezone)
+            row[10] = _google_date(brief.get("ends_at"), timezone)
+            row[19] = "\n".join(best[p["id"]]["screenshot_url"] for p in posts
+                if brief["id"] in p.get("placement_ids", []) and p["id"] in best)
+        row.extend([brief.get("client_name", ""), brief.get("language", ""), brief.get("planned_posts")]
+                   if brief else ["", "", None])
+    summary = [SUMMARY_HEADERS]
+    for group in view["summary"]:
+        picture_count = sum(p["id"] in best for p in posts if p["partner_id"] == group["partner_id"]
+            and group["client"] in clients_by_post.get(p["id"], set()))
+        if any(p.get("contract_plans") for p in partners if p["id"] == group["partner_id"]):
+            continue
+        summary.append([group["client"],
+            group["channel"], group["languages"], group["plan"], group["total"], group["remaining"],
+            group["visible_count"], group["unavailable_count"], picture_count,
+            _google_date(group["last_published"], timezone), group["channel_url"], "", 0])
+    from .contracts import contract_summary
+    for group in contract_summary(partners, posts, best):
+        summary.append([group["client"], group["channel"], group["language"], group["plan"], group["total"],
+                        group["remaining"], group["in_database"], group["unavailable"], group["pictures"],
+                        _google_date(group["last"], timezone), group["url"], group["contract"], group["baseline"]])
+    partner_by_id = {p["id"]: p for p in partners}
+    jobs = [JOB_HEADERS]
+    states = {"pending": "Ожидает", "done": "Измерено", "missed": "Пропущено", "unavailable": "Пост недоступен"}
+    for post in posts:
+        checks = {s["due_key"]: s for s in by_post[post["id"]]}
+        for job in post.get("measurement_jobs", []):
+            snapshot = checks.get(job["due_key"], {})
+            jobs.append([_channel(partner_by_id[post["partner_id"]]), post["url"],
+                "Первый замер" if job["due_key"] == "initial" else job["due_key"],
+                _google_date(job["due_at"], timezone), states.get(job["status"], job["status"]),
+                _google_date(snapshot.get("checked_at"), timezone), job.get("last_error") or "",
+                snapshot.get("views"), snapshot.get("screenshot_url") or "", snapshot.get("screenshot_status") or ""])
+    intake = [INTAKE_HEADERS]
+    stages = {"client": "Новый клиент", "needs_review": "Уточнить", "approved": "Согласовано",
+              "publication": "Ссылка на выход", "preview": "Превью", "material": "Материал", "context": "Уточнение"}
+    for partner in partners:
+        for item in partner.get("intake", []):
+            intake.append([item["message_id"], item.get("draft_name") or "", item.get("client_name") or "",
+                stages.get(item["kind"], item["kind"]), item["text"], item.get("review_reason") or "",
+                _google_date(item["received_at"], timezone)])
+    unavailable = [list(publications[0])] + [list(row) for row, post in zip(publications[1:], posts) if post.get("status") in {"unavailable", "deleted"}]
+    return publications, history, briefs, summary, jobs, intake, unavailable
 
 
 def _ordered(snapshots: list[dict]) -> list[dict]:
@@ -253,21 +364,25 @@ class GoogleReporter:
             elif not snapshot.get("screenshot_url"):
                 # A server-local path is not a usable link for spreadsheet readers.
                 snapshot["screenshot_path"] = ""
-        tables = _tables(partners, posts, snapshots, self.timezone)[:3]
+        tables = _google_tables(partners, posts, snapshots, self.timezone)
         base = f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}"
         metadata = self._json("GET", base, params={"fields": "sheets(properties)"})
         existing = {sheet["properties"]["title"]: sheet["properties"] for sheet in metadata.get("sheets", [])}
         requests = []
         grid_sizes = {}
-        for title, rows in zip(TABS, tables):
+        used_ids = {p["sheetId"] for p in existing.values()}
+        for title, rows, date_columns in zip(TABS, tables, GOOGLE_DATE_COLUMNS):
             needed_rows = max(100, len(rows))
             needed_cols = len(rows[0])
             if title not in existing:
-                requests.append({"addSheet": {"properties": {"title": title, "gridProperties": {
+                sheet_id = next(i for i in range(1, len(used_ids) + 2) if i not in used_ids)
+                used_ids.add(sheet_id)
+                requests.append({"addSheet": {"properties": {"title": title, "sheetId": sheet_id, "gridProperties": {
                     "rowCount": needed_rows, "columnCount": max(needed_cols, 10), "frozenRowCount": 1}}}})
                 grid_sizes[title] = needed_rows
             else:
                 properties = existing[title]
+                sheet_id = properties["sheetId"]
                 grid = properties.get("gridProperties", {})
                 current_rows = grid.get("rowCount", 1000)
                 current_cols = grid.get("columnCount", 26)
@@ -276,13 +391,30 @@ class GoogleReporter:
                     requests.append({"updateSheetProperties": {"properties": {"sheetId": properties["sheetId"],
                         "gridProperties": {"rowCount": max(current_rows, needed_rows), "columnCount": max(current_cols, needed_cols)}},
                         "fields": "gridProperties.rowCount,gridProperties.columnCount"}})
+            requests.extend([
+                {"updateSheetProperties": {"properties": {"sheetId": sheet_id,
+                    "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
+                {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1,
+                    "startColumnIndex": 0, "endColumnIndex": needed_cols}, "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.94, "green": 0.94, "blue": 0.94},
+                    "textFormat": {"bold": True, "fontFamily": "Arial", "foregroundColor": {"red": 0, "green": 0, "blue": 0}},
+                    "wrapStrategy": "WRAP"}}, "fields": "userEnteredFormat"}},
+                {"setBasicFilter": {"filter": {"range": {"sheetId": sheet_id,
+                    "startRowIndex": 0, "endRowIndex": max(1, len(rows)), "startColumnIndex": 0, "endColumnIndex": needed_cols}}}},
+            ])
+            if len(rows) > 1:
+                for column in date_columns:
+                    requests.append({"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 1,
+                        "endRowIndex": len(rows), "startColumnIndex": column, "endColumnIndex": column + 1},
+                        "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE_TIME", "pattern": "dd.mm.yyyy hh:mm:ss"}}},
+                        "fields": "userEnteredFormat.numberFormat"}})
         if requests:
             self._json("POST", base + ":batchUpdate", json={"requests": requests})
         self._json("POST", base + "/values:batchUpdate", json={"valueInputOption": "RAW", "data": [
             {"range": f"'{title}'!A1", "values": [[_google_value(v) for v in row] for row in rows]}
             for title, rows in zip(TABS, tables)
         ]})
-        # Clear only the old tail, after a successful write; never touch gid=0.
+        # Clear only managed tabs' old tails, after a successful write.
         ranges = [f"'{title}'!A{len(rows)+1}:{get_column_letter(len(rows[0]))}{grid_sizes[title]}"
                   for title, rows in zip(TABS, tables) if len(rows) < grid_sizes[title]]
         if ranges:

@@ -18,12 +18,18 @@ log = logging.getLogger(__name__)
 
 def prepare_config(root: Path, environment):
     path = root / "config.yaml"
-    source = path if path.exists() else root / "config.example.yaml"
+    configured = environment.get("MONITOR_CONFIG_FILE", "").strip()
+    source = Path(configured) if configured else path if path.exists() else root / "config.example.yaml"
     data = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("config.yaml must contain a YAML mapping")
     if environment.get("SOURCE_GROUP", "").strip():
         data["source_group"] = environment["SOURCE_GROUP"].strip()
+    for variable, field in (("GOOGLE_SPREADSHEET_ID", "spreadsheet_id"),
+                            ("GOOGLE_DRIVE_FOLDER_ID", "drive_folder_id"),
+                            ("GOOGLE_CREDENTIALS_FILE", "google_credentials")):
+        if environment.get(variable, "").strip():
+            data[field] = environment[variable].strip()
     temporary = path.with_suffix(".yaml.tmp")
     temporary.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
     temporary.replace(path)
@@ -78,6 +84,7 @@ def main(root=None, environment=None):
         return 0
     if not config.source_group:
         raise ValueError("Set SOURCE_GROUP before switching MONITOR_MODE to run")
+    config.validate_run()
     config.telegram_credentials()
     if not (config.data_dir / "telegram.session").is_file():
         raise ValueError("Telegram session is missing; finish login in setup mode first")

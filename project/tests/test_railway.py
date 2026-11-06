@@ -46,10 +46,28 @@ class RailwayTests(unittest.TestCase):
                 main(self.root, {'MONITOR_MODE': 'run'})
         verify.assert_not_called()
 
+    def test_google_settings_survive_a_fresh_container_configuration(self):
+        path = self.root / 'data' / 'google.json'
+        config = prepare_config(self.root, {'GOOGLE_SPREADSHEET_ID': 'test-sheet',
+            'GOOGLE_DRIVE_FOLDER_ID': 'test-folder', 'GOOGLE_CREDENTIALS_FILE': str(path)})
+        self.assertEqual(config.spreadsheet_id, 'test-sheet')
+        self.assertEqual(config.drive_folder_id, 'test-folder')
+        self.assertEqual(config.google_credentials, path.resolve())
+
     def test_invalid_mode_does_not_create_configuration(self):
         with self.assertRaisesRegex(ValueError, 'MONITOR_MODE'):
             main(self.root, {'MONITOR_MODE': 'wrong'})
         self.assertFalse((self.root / 'config.yaml').exists())
+
+    def test_persistent_test_configuration_is_reloaded_after_deployment(self):
+        path = self.root / 'data' / 'test-config.yaml'
+        path.parent.mkdir()
+        path.write_text("source_group: '-1001234567890'\ntest_mode: true\nconversation_mode: true\ndata_namespace: test\nallowed_channels: [partner_one]\nmilestones_hours: [24, 48]\n", encoding='utf-8')
+        config = prepare_config(self.root, {'MONITOR_CONFIG_FILE': str(path)})
+        self.assertTrue(config.test_mode)
+        self.assertEqual(config.db_path, self.root / 'data' / 'test' / 'monitor.sqlite3')
+        self.assertEqual(config.milestones_hours, (24, 48))
+        config.validate_run()
 
 
 class RailwayAccountTests(unittest.IsolatedAsyncioTestCase):

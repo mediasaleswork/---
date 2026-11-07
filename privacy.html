@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Как Partner Monitor использует доступ к Google Sheets и Google Drive, хранит данные и позволяет отозвать доступ.">
+  <title>Конфиденциальность — Partner Monitor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#content">Перейти к содержанию</a>
+  <header><div class="shell header-inner">
+    <a class="brand" href="index.html" aria-label="Media Sales — Partner Monitor">MEDIASALES</a>
+    <nav aria-label="Служебные страницы">
+      <a href="index.html">О приложении</a>
+      <a href="privacy.html" aria-current="page">Конфиденциальность</a>
+      <a href="terms.html">Условия</a>
+    </nav>
+  </div></header>
+  <main class="shell" id="content">
+    <h1>Политика конфиденциальности</h1>
+    <p class="date">Partner Monitor · Обновлено 7 ноября 2026 года</p>
+    <p>Эта страница описывает обработку данных внутренним инструментом Partner Monitor, которым управляет Media Sales. Вопросы о данных и удалении: <a href="mailto:mediasaleswork@gmail.com">mediasaleswork@gmail.com</a>.</p>
+    <h2>Какие данные используются</h2>
+    <p>Приложение получает предоставленный оператором доступ к Google Sheets и Google Drive. Оно читает настройки и структуру выделенного отчёта, обновляет его содержимое, сохраняет снимки в настроенную папку и при необходимости читает ранее сохранённые снимки.</p>
+    <p>Для отчёта обрабатываются данные из настроенных источников Telegram: текст заявки и публикации, ссылки, даты, число просмотров и изображения. Доступ к Telegram настраивается отдельно от Google.</p>
+    <h2>Для чего нужны разрешения Google</h2>
+    <p>Разрешение Google Sheets нужно для записи и оформления отчёта. Разрешение Google Drive — для обновления файла таблицы с изображениями, загрузки снимков и восстановления сохранённых изображений. Эти разрешения Google технически охватывают файлы аккаунта; приложение обращается к отчёту и папке, указанным оператором в его конфигурации.</p>
+    <h2>Хранение и передача</h2>
+    <p>Рабочая база, снимки и OAuth-токен хранятся на постоянном томе сервера приложения в Railway. Отчёт и сохранённые изображения находятся в Google Drive подключённого аккаунта. Данные передаются Google и Railway для работы этих функций. Доступ читателей к отчёту определяется настройками Google Drive.</p>
+    <p>Приложение не делает файлы публичными автоматически, не продаёт данные Google и не использует их для рекламного профилирования или обучения моделей машинного обучения. Данные Google используются только для описанной функции отчётности и обрабатываются в соответствии с <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, включая требования Limited Use.</p>
+    <h2>Срок хранения и удаление</h2>
+    <p>Отчёты, база и снимки сохраняются до их отдельного удаления оператором. Отзыв доступа Google прекращает дальнейшие обращения к Google API, но сам по себе не удаляет уже созданные файлы и локальные копии. Для удаления этих данных оператор удаляет их в Google Drive и на сервере приложения либо обращается по указанному выше адресу.</p>
+    <h2>Как отозвать доступ</h2>
+    <p>Разрешение можно отозвать в разделе <a href="https://myaccount.google.com/connections">подключений Google-аккаунта</a>. После отзыва синхронизация Google прекратится до нового подключения.</p>
+    <h2>Служебные страницы</h2>
+    <p>Эти страницы не содержат форм сбора данных, рекламных трекеров или сторонних скриптов. Их размещает GitHub Pages; технические запросы к хостингу обрабатываются GitHub согласно его <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">политике конфиденциальности</a>.</p>
+  </main>
+  <footer><div class="shell footer-inner">
+    <a href="index.html">О приложении</a>
+    <a href="mailto:mediasaleswork@gmail.com">mediasaleswork@gmail.com</a>
+  </div></footer>
+</body>
+</html>

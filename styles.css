@@ -1,0 +1,49 @@
+:root {
+  color-scheme: light;
+  --ink: #202321;
+  --muted: #525954;
+  --paper: #ffffff;
+  --edge: #d8ded9;
+  --link: #205a40;
+  --focus: #205a40;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 18px;
+  line-height: 1.65;
+  background: var(--paper);
+  color: var(--ink);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: var(--link); text-underline-offset: .2em; text-decoration-thickness: 1px; transition: color 160ms ease-out; }
+a:hover { color: var(--ink); text-decoration-thickness: 2px; }
+a:focus-visible { outline: 2px solid var(--focus); outline-offset: 5px; border-radius: 2px; }
+::selection { color: #ffffff; background: var(--link); }
+.shell { width: min(100% - 48px, 72ch); margin-inline: auto; }
+.skip { position: absolute; top: 12px; left: 12px; padding: 8px 12px; background: var(--paper); transform: translateY(-180%); }
+.skip:focus { transform: none; }
+header { border-bottom: 1px solid var(--edge); }
+.header-inner { padding-block: 22px; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px 24px; }
+.brand { color: var(--ink); font-size: .9rem; font-weight: 700; letter-spacing: .045em; text-decoration: none; }
+nav { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: .85rem; }
+nav a[aria-current="page"] { color: var(--ink); text-decoration-thickness: 2px; }
+main { padding-block: 54px 64px; }
+h1 { margin: 0 0 20px; font-size: 2.2rem; line-height: 1.18; letter-spacing: -.025em; font-weight: 600; text-wrap: balance; }
+h2 { margin: 34px 0 10px; font-size: 1.25rem; line-height: 1.35; font-weight: 600; }
+p { margin: 0 0 18px; }
+ul { margin: 0 0 22px; padding-left: 1.35em; }
+li { margin-block: 8px; padding-left: .2em; }
+.lead { font-size: 1.1rem; }
+.date { color: var(--muted); font-size: .85rem; margin-bottom: 30px; }
+.links { border-top: 1px solid var(--edge); padding-top: 24px; margin-top: 36px; display: grid; gap: 12px; }
+footer { border-top: 1px solid var(--edge); color: var(--muted); font-size: .8rem; }
+.footer-inner { padding-block: 24px 34px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 24px; }
+main, p, li, a { overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .shell { width: calc(100% - 36px); }
+  .header-inner { padding-block: 18px; }
+  nav { gap: 8px 18px; }
+  main { padding-block: 36px 44px; }
+  h1 { font-size: 1.8rem; }
+  .lead { font-size: 1rem; }
+}
+@media (prefers-reduced-motion: reduce) { a { transition: none; } }

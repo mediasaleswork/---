@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import logging
 import os
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -20,6 +21,8 @@ from telethon import types
 from .message_content import combined_content
 from .parsing import PartnerReference
 from .storage import utcnow
+
+log = logging.getLogger(__name__)
 
 VERSION = "campaign-v1"
 MAX_CAMPAIGNS = 6
@@ -352,6 +355,7 @@ class CampaignWorker:
             except CampaignAPIError as exc:
                 attempts = self.store.rows("SELECT attempts FROM campaign_checks WHERE id=?", (job["id"],))[0]["attempts"]
                 code = str(exc)
+                log.warning("Распознавание %s: проверка %s отложена (%s)", self.config.campaign_provider, job["id"][:10], code)
                 if code == "http_429":
                     # Shared project quota: stop the entire batch, never switch
                     # keys/providers or activate paid billing to evade it.
@@ -378,6 +382,8 @@ class CampaignWorker:
     def finish(self, job, status, reason, value=None):
         self.store.execute("UPDATE campaign_checks SET status=?,reason=?,decision=?,checked_at=? WHERE id=?",
                            (status, reason[:1500], packed(value) if value else None, utcnow(), job["id"]))
+        log.info("Распознавание %s: проверка %s, сообщения %s, результат %s",
+                 self.config.campaign_provider, job["id"][:10], job["message_ids"], status)
         self.monitor.changed.set()
 
 

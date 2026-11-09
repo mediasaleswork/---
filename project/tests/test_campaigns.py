@@ -165,6 +165,17 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p["message_id"] for p in self.store.rows("SELECT * FROM posts")], [8])
         self.assertEqual(self.judge.compare.call_count, 1)
 
+    async def test_brand_in_hidden_url_prioritizes_the_candidate(self):
+        from telethon import types
+        first = message(7, "Публикация о погоде")
+        second = message(8, "Подробности", entities=[types.MessageEntityTextUrl(0, 11, "https://brb.example/offer")])
+        self.prepare(candidates=[first, second])
+        self.store.execute("UPDATE placements SET client_name='BRB'")
+        self.monitor.config = replace(self.config, campaign_daily_limit=1)
+        self.monitor.campaign_worker.config = self.monitor.config
+        await self.tick()
+        self.assertEqual([p["message_id"] for p in self.store.rows("SELECT * FROM posts")], [8])
+
     async def test_no_api_key_keeps_queue_and_does_not_spend_budget(self):
         self.prepare()
         self.monitor.campaign_worker = CampaignWorker(self.monitor)

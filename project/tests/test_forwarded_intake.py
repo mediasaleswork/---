@@ -121,3 +121,19 @@ class ForwardedIntakeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await monitor.ingest_group()
         self.assertFalse([c for c in client.calls if c[0] == "history"])
+
+    async def test_earlier_start_replays_history_without_duplicate_materials(self):
+        recent_start = NOW - timedelta(minutes=1)
+        config = replace(self.config, source_since=recent_start.isoformat(), allowed_channels=("partner_one",))
+        early = image_message(1, "Ранний материал")
+        early.date = NOW - timedelta(hours=2)
+        client = FakeClient([early, image_message(2, "Свежий материал")])
+        monitor = Monitor(config, self.store, client, FakeCapture())
+        await monitor.ingest_group()
+        self.assertEqual([r["anchor_id"] for r in self.store.rows("SELECT * FROM intake_drafts")], [2])
+        replay = Monitor(replace(config, source_since=(NOW - timedelta(hours=3)).isoformat()), self.store, client, FakeCapture())
+        await replay.ingest_group()
+        await replay.ingest_group()
+        self.assertEqual(sorted(r["anchor_id"] for r in self.store.rows("SELECT * FROM intake_drafts")), [1, 2])
+        self.assertEqual(len(self.store.rows("SELECT * FROM source_messages")), 2)
+        self.assertEqual(len(self.store.rows("SELECT * FROM placements")), 2)

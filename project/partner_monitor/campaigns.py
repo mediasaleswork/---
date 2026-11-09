@@ -107,6 +107,9 @@ def enqueue(store, config, partner, messages, placements):
     relevance = max((len(tokens.intersection(re.findall(r"[\w']{5,}", p["source_text"].casefold()))) for p in placements), default=0)
     reference_urls = {url for p in placements for url in re.findall(r"https?://[^\s<>]+", p["source_text"])}
     priority = min(50, relevance) + (100 if reference_urls.intersection(actual.urls) else 0)
+    candidate_text = actual.text + "\n" + "\n".join(actual.urls)
+    if any(p.get("client_name") and re.search(r"(?<!\w)" + re.escape(p["client_name"]) + r"(?!\w)", candidate_text, re.I) for p in placements):
+        priority += 200
     if re.search(r"реклама|ҳамкорлик|hamkorlik|reklama", actual.text, re.I):
         priority += 20
     store.execute("""INSERT OR IGNORE INTO campaign_checks(id,partner_id,message_ids,placement_ids,

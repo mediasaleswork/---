@@ -207,6 +207,10 @@ class Monitor:
             log.info("Группа подтверждена: %s; автоматический приём пересылок %s", entity.title, self.config.forwarded_intake)
             self.store.set_state("source_verified", str(self.source_peer_id))
         key = f"source_cursor:{entity.id}"
+        if self.config.source_since:
+            # A newly requested historical boundary has an independent cursor.
+            # Source-message and publication keys keep the replay idempotent.
+            key += ":since:" + self.config.source_since
         cursor = int(self.store.state(key))
         options = {"min_id": cursor, "reverse": True, "limit": self.config.batch_size}
         if not cursor:

@@ -29,7 +29,11 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
             count = collect(cfg, store, now)
             if not store.db.execute("SELECT 1 FROM source_health WHERE status='ok'").fetchone():
                 raise ValueError("No sources available")
-        queue = [s for s in store.pending((now - timedelta(days=cfg.lookback_days)).isoformat()) if relevant(s)]
+        pending=store.pending((now - timedelta(days=cfg.lookback_days)).isoformat())
+        queue = [s for s in pending if relevant(s)]
+        accepted_ids={s['id'] for s in queue}
+        # Drain irrelevant stories too, so a busy news channel cannot permanently hide older candidates.
+        store.processed([s['id'] for s in pending if s['id'] not in accepted_ids])
         # Round-robin origins gives the configured sources a fair share of new leads.
         grouped = {}
         for item in queue:

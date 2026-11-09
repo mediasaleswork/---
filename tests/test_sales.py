@@ -129,6 +129,13 @@ class SalesTests(unittest.TestCase):
         self.assertEqual(repeat['new_leads'],0)
         self.assertEqual(self.store.state('research_engine'),'rules-1')
 
+    def test_noncommercial_news_does_not_block_the_persistent_queue(self):
+        self.store.add_source(dict(url='https://news.example/exchange',title='Курсы валют',
+            text='Опубликованы текущие курсы валют. Справочные данные банков о стоимости доллара и евро за сегодняшний день.',
+            published=NOW.isoformat(),origin='news',links=[]))
+        cycle(self.cfg,self.store,now=NOW,collect_sources=False)
+        self.assertFalse(self.store.pending('2026'))
+
     def test_unknown_brand_and_uzbek_brand_use_literal_evidence(self):
         for body,name in [
             ('Asterium запускает новый продукт для предпринимателей Узбекистана с удобными финансовыми инструментами.','Asterium'),

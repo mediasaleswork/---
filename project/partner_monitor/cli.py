@@ -73,6 +73,7 @@ def main(argv=None):
     content.add_argument("--text")
     content.add_argument("--file", type=Path)
     sub.add_parser("review", help="Список заявок, требующих уточнения")
+    sub.add_parser("campaign-review", help="Очередь распознавания: сомнительные совпадения и ошибки; без подключения Telegram")
     resolve = sub.add_parser("resolve", help="Уточнить одну заявку и запустить её мониторинг")
     resolve.add_argument("id", type=int)
     resolve.add_argument("--start", required=True, help="YYYY-MM-DD HH:MM, местное время из config.yaml")
@@ -103,6 +104,7 @@ def main(argv=None):
             print("Рабочая группа: " + ("указана" if config.source_group else "нужно заполнить source_group перед run"))
             print("Telegram: " + ("переменные заданы" if os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH") else "нужны TELEGRAM_API_ID и TELEGRAM_API_HASH перед login"))
             print("Google: " + ("настроен путь к credentials" if config.google_credentials else "не подключён; Excel доступен без Google"))
+            print("Распознавание кампаний: " + ("включено; ключ " + ("задан" if os.environ.get("OPENAI_API_KEY") else "не задан") if config.campaign_matching else "выключено"))
         elif args.command in {"login", "dialogs"}:
             asyncio.run(telegram_command(config, args.command))
         elif args.command == "run":
@@ -185,6 +187,12 @@ def main(argv=None):
                         print(f"  {row['status']}: {row['n']}")
                     for row in store.rows("SELECT status,COUNT(*) AS n FROM placements GROUP BY status"):
                         print(f"  заявки {row['status']}: {row['n']}")
+                    for row in store.rows("SELECT status,COUNT(*) AS n FROM campaign_checks GROUP BY status"):
+                        print(f"  распознавание {row['status']}: {row['n']}")
+                elif args.command == "campaign-review":
+                    rows = store.rows("""SELECT c.id,p.username,c.message_ids,c.status,c.reason FROM campaign_checks c
+                        JOIN partners p ON p.id=c.partner_id WHERE c.status IN ('review','error','pending') ORDER BY c.created_at LIMIT 100""")
+                    print(json.dumps(rows, ensure_ascii=False, indent=2))
                 elif args.command == "sync-google":
                     from .reports import GoogleReporter
                     if not config.google_credentials or not config.spreadsheet_id:

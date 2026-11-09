@@ -26,7 +26,7 @@ PINK = "FBE0E1"
 DATE_FORMAT = "yyyy-mm-dd hh:mm"
 
 
-def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashkent", month=None, note="", compact=False):
+def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashkent", month=None, note=""):
     from .reports import _cell, _tables, _write_table, _ordered
     view = build_view(partners, posts, snapshots, timezone, month)
     selected = {p["id"] for p in view["records"]}
@@ -90,14 +90,12 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     report.merge_cells("D2:L2")
     put(report, 2, 4, "Размещения рекламы", True).font = Font(name="Arial", size=16, bold=True, color=INK)
     report.merge_cells("A4:L4")
-    put(report, 4, 1, f"Время: {timezone}" if compact else f"Период публикаций: {month or 'все даты'}. Время: {timezone}. Заказано, опубликовано и осталось — за весь срок заявки.")
+    put(report, 4, 1, f"Период публикаций: {month or 'все даты'}. Время: {timezone}. Заказано, опубликовано и осталось — за весь срок заявки.")
     report.merge_cells("A5:L5")
-    put(report, 5, 1, note if compact else note or "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён.")
+    put(report, 5, 1, note or "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён.")
     report.row_dimensions[5].height = 30
     band(report, 7, "СВОДКА ПО ПЛОЩАДКАМ")
     headers = ["№", "Инструмент", "Площадки", "Язык", "Заказано постов", "Опубликовано", "Осталось опубликовать", "Постов за период", "Не удалось открыть", "Постов со скриншотом", "Последняя публикация", "Публикации"]
-    if compact:
-        headers = ["№", "Инструмент", "Площадки", "Язык", "План", "Вышло", "Осталось", "За период", "Недоступны", "Со снимком", "Последний выход", "Публикации"]
     explanations = {
         5: "Сколько публикаций заказано по всем заявкам этого инструмента на этой площадке. Пусто, если заказанное количество указано не полностью.",
         6: "Сколько уникальных постов найдено за весь срок заявок, включая посты, которые позднее стали недоступны.",
@@ -139,7 +137,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     row = summary_end + 3
     band(report, row, "ПУБЛИКАЦИИ И СКРИНШОТЫ")
     report.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=12)
-    put(report, row + 1, 1, "" if compact else "Одна строка — один пост. Нажмите на публикацию, чтобы открыть Telegram; на инструмент — чтобы перейти в реестр.")
+    put(report, row + 1, 1, "Одна строка — один пост. Нажмите на публикацию, чтобы открыть Telegram; на инструмент — чтобы перейти в реестр.")
     report.row_dimensions[row + 1].height = 25
     row += 2
     columns = [(1, 2, "Инструмент"), (3, 4, "Площадки"), (5, 6, "Публикация"),
@@ -213,8 +211,6 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
                   ("Размещение", ("; ".join(f"{h:g}" for h in item["durations"]) + " ч") if item["durations"] else "Не указано"),
                   ("Плановое снятие", shown_time(item["until"])),
                   ("Снимок сделан", shown_time(item["picture_at"]))]
-        if compact and not item["durations"]:
-            fields = [(label, value) for label, value in fields if label not in {"Размещение", "Плановое снятие"}]
         information = "\n".join(f"{label}: {value}" for label, value in fields)
         note_text = "\n".join(dict.fromkeys(t for t in (item["picture_note"], item["error"]) if t))
         if note_text:
@@ -318,9 +314,6 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
             table = Table(displayName={detail.title: "Publications", unavailable.title: "UnavailablePosts", history_sheet.title: "ViewHistory", briefs_sheet.title: "PlacementBriefs"}[sheet.title], ref=sheet.dimensions)
             table.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=True)
             sheet.add_table(table)
-    if compact:
-        for sheet in (detail, history_sheet, briefs_sheet):
-            sheet.sheet_state = "hidden"
     for col, width in {"A": 22, "B": 25, "C": 28, "D": 40, "E": 23, "F": 26, "G": 14, "H": 23, "I": 20, "J": 16, "K": 23, "L": 13, "M": 10, "R": 45}.items():
         detail.column_dimensions[col].width = width
     if detail.max_row > 1:

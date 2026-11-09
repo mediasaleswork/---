@@ -20,6 +20,12 @@ COPY partner_monitor ./partner_monitor
 COPY deploy/railway_entrypoint.py ./deploy/railway_entrypoint.py
 RUN pip install --no-cache-dir --no-deps .
 
+# Verify the same Linux Chromium and code that will run on Railway. These
+# fixtures are local; no Telegram/Google/OpenAI credentials or live calls.
+COPY tests ./tests
+RUN PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$(python -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()') \
+    python -m unittest discover -s tests -q
+
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "deploy/railway_entrypoint.py"]
 

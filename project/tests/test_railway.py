@@ -59,6 +59,17 @@ class RailwayTests(unittest.TestCase):
             main(self.root, {'MONITOR_MODE': 'wrong'})
         self.assertFalse((self.root / 'config.yaml').exists())
 
+    def test_campaign_environment_is_explicit_and_never_copies_api_key(self):
+        config = prepare_config(self.root, {'CAMPAIGN_MATCHING': 'true', 'CAMPAIGN_MODEL': 'test-model',
+            'CAMPAIGN_DAILY_LIMIT': '8', 'CAMPAIGN_BATCH_SIZE': '2', 'OPENAI_API_KEY': 'test-secret'})
+        self.assertTrue(config.campaign_matching)
+        self.assertEqual(config.campaign_daily_limit, 8)
+        self.assertEqual(config.campaign_batch_size, 2)
+        self.assertEqual(config.campaign_model, 'test-model')
+        self.assertNotIn('test-secret', (self.root / 'config.yaml').read_text(encoding='utf-8'))
+        with self.assertRaises(ValueError):
+            prepare_config(self.root, {'CAMPAIGN_MATCHING': 'yes'})
+
     def test_persistent_test_configuration_is_reloaded_after_deployment(self):
         path = self.root / 'data' / 'test-config.yaml'
         path.parent.mkdir()

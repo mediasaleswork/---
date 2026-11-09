@@ -58,6 +58,21 @@ class Monitor:
         self._attempted = set()
         self._capturing = set()
         self._allowed_origins = None
+        self.campaign_wake = asyncio.Event()
+        self.campaign_worker = None
+        if config.campaign_matching:
+            from .campaigns import CampaignWorker
+            self.campaign_worker = CampaignWorker(self)
+
+    def queue_campaign(self, partner, messages, placements):
+        from .campaigns import enqueue
+        published = messages[0].date
+        eligible = [p for p in placements if p["status"] not in {"needs_review", "dismissed", "not_found"}
+                    and not json.loads(p["direct_ids"])
+                    and datetime.fromisoformat(p["starts_at"]) <= published < datetime.fromisoformat(p["ends_at"])]
+        enqueue(self.store, self.config, partner, messages, eligible)
+        if eligible:
+            self.campaign_wake.set()
 
     async def record_post(self, partner, entity, members, reason, placements=()):
         """Persist and capture at discovery, before scanning the next message."""
@@ -111,11 +126,13 @@ class Monitor:
                         reason = "direct_link:ссылка из заявки"
                     continue
                 if datetime.fromisoformat(placement["starts_at"]) <= messages[0].date < datetime.fromisoformat(placement["ends_at"]):
+                    if self.config.campaign_matching:
+                        continue
                     match = matches_placement(messages, placement)
                     if match.matched:
                         matched.append(placement)
                         reason = reason or match.reason
-            if not placements:
+            if not placements and not self.config.campaign_matching:
                 reason = match_ad(text, self.config.keywords, self.config.domains).reason
             if matched or not placements and reason:
                 await self.record_post(partner, types.PeerChannel(channel_id), messages, reason, matched)
@@ -123,6 +140,8 @@ class Monitor:
                     for mid in json.loads(placement["direct_ids"]):
                         if any(m.id == mid for m in messages):
                             self.store.execute("UPDATE requested_posts SET done=1 WHERE partner_id=? AND message_id=?", (partner["id"], mid))
+            if self.config.campaign_matching:
+                self.queue_campaign(partner, messages, placements)
 
     async def ingest_group(self):
         self.config.validate_run()
@@ -294,7 +313,9 @@ class Monitor:
                     members = await self.album(entity, message)
                     published = members[0].date
                     text = search_text(members)
-                    for placement in searches:
+                    if self.config.campaign_matching:
+                        self.queue_campaign(partner, members, placements)
+                    for placement in ([] if self.config.campaign_matching else searches):
                         if not datetime.fromisoformat(placement["starts_at"]) <= published < datetime.fromisoformat(placement["ends_at"]):
                             continue
                         match = matches_placement(members, placement)
@@ -310,6 +331,11 @@ class Monitor:
             # batch has been processed, even if the publication window expired.
             complete = end <= now and (count < self.config.batch_size or latest is not None and latest >= end)
             if complete:
+                if self.config.campaign_matching:
+                    pending = self.store.rows("SELECT placement_ids FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','review')", (partner["id"],))
+                    if any(placement["id"] in json.loads(j["placement_ids"]) for j in pending):
+                        self.store.execute("UPDATE placements SET scan_complete=1 WHERE id=?", (placement["id"],))
+                        continue
                 self.store.execute("""UPDATE placements SET scan_complete=1,status=CASE WHEN EXISTS(
                   SELECT 1 FROM placement_posts WHERE placement_id=placements.id) THEN 'found' ELSE 'not_found' END
                   WHERE id=?""", (placement["id"],))
@@ -420,13 +446,18 @@ class Monitor:
                 self.store.execute("UPDATE partners SET channel_id=?,private_channel_id=?,title=?,status='active',last_error=NULL WHERE id=?", (entity.id, entity.id if not partner["username"] else None, entity.title, partner["id"]))
                 if self.on_channel:
                     self.on_channel(partner, entity)
-                await self.discover(partner, entity)
                 await self.measure(partner, entity)
+                await self.discover(partner, entity)
             except errors.FloodWaitError:
                 raise
             except (ValueError, errors.RPCError) as exc:
                 self.store.execute("UPDATE partners SET status=?,last_error=? WHERE id=?", ("unavailable" if partner["username"] else "private", f"Не удалось проверить канал: {type(exc).__name__}; доступ не подтверждён" if not partner["username"] else f"Не удалось проверить канал: {type(exc).__name__}", partner["id"]))
                 log.warning("Канал @%s недоступен: %s", partner["username"], type(exc).__name__)
+        if self.campaign_worker:
+            try:
+                await self.campaign_worker.process()
+            except Exception as exc:
+                log.warning("Распознавание отложено (%s); задания сохранены", type(exc).__name__)
 
 
 async def publish_reports(config, store):
@@ -468,9 +499,13 @@ async def run(config: Config, *, once: bool = False):
                 from .realtime import Realtime
                 realtime = Realtime(monitor)
                 publisher = None
+                campaign_task = None
                 if not once:
                     realtime.start()
                     publisher = asyncio.create_task(report_loop(monitor))
+                    if monitor.campaign_worker:
+                        from .campaigns import campaign_loop
+                        campaign_task = asyncio.create_task(campaign_loop(monitor))
                 try:
                     while True:
                         monitor.wake.clear()
@@ -502,5 +537,8 @@ async def run(config: Config, *, once: bool = False):
                     if publisher:
                         publisher.cancel()
                         await asyncio.gather(publisher, return_exceptions=True)
+                    if campaign_task:
+                        campaign_task.cancel()
+                        await asyncio.gather(campaign_task, return_exceptions=True)
     finally:
         await client.disconnect()

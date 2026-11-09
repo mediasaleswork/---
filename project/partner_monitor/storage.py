@@ -76,6 +76,14 @@ class Store(AbstractContextManager):
           text TEXT NOT NULL, media_keys TEXT NOT NULL, targets TEXT NOT NULL,
           kind TEXT NOT NULL, review_reason TEXT, received_at TEXT NOT NULL,
           PRIMARY KEY(source_chat_id,message_id));
+        CREATE TABLE IF NOT EXISTS campaign_checks (
+          id TEXT PRIMARY KEY, partner_id INTEGER NOT NULL REFERENCES partners(id),
+          message_ids TEXT NOT NULL, placement_ids TEXT NOT NULL,
+          source_signature TEXT NOT NULL, candidate_signature TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+          next_try_at TEXT NOT NULL, created_at TEXT NOT NULL, checked_at TEXT,
+          reason TEXT NOT NULL DEFAULT '', decision TEXT, post_id INTEGER REFERENCES posts(id));
+        CREATE INDEX IF NOT EXISTS campaign_pending ON campaign_checks(status,next_try_at);
         """)
         # Compatible with databases created by early versions of the MVP.
         if "channel_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(partners)")}:

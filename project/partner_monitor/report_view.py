@@ -40,7 +40,7 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
         checks[snapshot["post_id"]].append(snapshot)
     groups = {}
     for partner in partners:
-        for brief in partner.get("placements", []) or ([] if partner.get("contract_plans") else [{}]):
+        for brief in partner.get("placements", []) or [{}]:
             client = brief.get("client_name") or "Клиент не указан"
             key = (client.casefold(), partner["id"])
             group = groups.setdefault(key, {"client": client, "partner_id": partner["id"],
@@ -112,23 +112,5 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
             "picture_count": sum(bool(p["picture_path"]) for p in visible), "languages": ", ".join(sorted(group["languages"])),
             "last_published": max((p["published"] for p in visible), default=None), "first_post_id": visible[0]["id"] if visible else None})
         summary.append(group)
-    if any(p.get("contract_plans") for p in partners):
-        from .contracts import contract_summary
-        contracted = {(plan["client_name"].casefold(),p["id"]) for p in partners for plan in p.get("contract_plans", [])}
-        summary = [g for g in summary if (g["client"].casefold(),g["partner_id"]) not in contracted]
-        pictures = {r["id"] for r in records if r["picture_path"]}
-        # contract_summary counts the entire contract, while the visible post
-        # rows and their availability still respect the selected report month.
-        for item in contract_summary(partners, posts, pictures):
-            pid = item["partner_id"]
-            visible = [r for r in records if r["id"] in item["post_ids"]]
-            summary.append(dict(client=item["client"], partner_id=pid, channel=item["channel"],
-                channel_url=item["url"], languages=item["language"], plan=item["plan"],
-                total=item["total"], remaining=item["remaining"], visible_count=len(visible),
-                unavailable_count=sum(r["unavailable"] for r in visible),
-                picture_count=sum(bool(r["picture_path"]) for r in visible),
-                last_published=max((r["published"] for r in visible), default=None),
-                first_post_id=visible[0]["id"] if visible else None))
-        summary.sort(key=lambda g: (g["client"].casefold(),g["channel"].casefold(),g["partner_id"]))
     return {"timezone": timezone_name, "month": month, "summary": summary, "records": records,
             "unavailable": [p for p in records if p["unavailable"]]}

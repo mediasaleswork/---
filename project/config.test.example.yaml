@@ -21,3 +21,10 @@ milestones_hours: [24, 48]
 spreadsheet_id: ""
 google_credentials: ""
 drive_folder_id: ""
+
+# Optional paid vision/semantic matching. API key only in OPENAI_API_KEY.
+# Enable only after permission to send the test advertisement materials to OpenAI.
+campaign_matching: false
+campaign_model: gpt-5.4-mini-2026-03-17
+campaign_daily_limit: 8
+campaign_batch_size: 2

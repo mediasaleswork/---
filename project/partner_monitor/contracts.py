@@ -30,7 +30,6 @@ def contract_summary(partners, posts, successful_pictures):
                    and (not plan.get("baseline_until") or datetime.fromisoformat(p["published_at"]) > datetime.fromisoformat(plan["baseline_until"]))}
             total = plan["baseline_count"] + len(new)
             result.append(dict(client=plan["client_name"], channel=plan["title"], language=plan["language"],
-                partner_id=partner["id"], post_ids={p["id"] for p in relevant},
                 plan=plan["planned_posts"], total=total, remaining=max(0, plan["planned_posts"] - total),
                 in_database=len({p["id"] for p in relevant}), unavailable=sum(p["status"] in {"unavailable", "deleted"} for p in relevant),
                 pictures=sum(p["id"] in successful_pictures for p in relevant),

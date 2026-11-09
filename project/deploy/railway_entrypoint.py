@@ -30,6 +30,17 @@ def prepare_config(root: Path, environment):
                             ("GOOGLE_CREDENTIALS_FILE", "google_credentials")):
         if environment.get(variable, "").strip():
             data[field] = environment[variable].strip()
+    if environment.get("CAMPAIGN_MATCHING", "").strip():
+        value = environment["CAMPAIGN_MATCHING"].strip().lower()
+        if value not in {"true", "false"}:
+            raise ValueError("CAMPAIGN_MATCHING must be true or false")
+        data["campaign_matching"] = value == "true"
+    for variable, field in (("CAMPAIGN_MODEL", "campaign_model"),
+                            ("CAMPAIGN_DAILY_LIMIT", "campaign_daily_limit"),
+                            ("CAMPAIGN_BATCH_SIZE", "campaign_batch_size")):
+        if environment.get(variable, "").strip():
+            value = environment[variable].strip()
+            data[field] = value if field == "campaign_model" else int(value)
     temporary = path.with_suffix(".yaml.tmp")
     temporary.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
     temporary.replace(path)

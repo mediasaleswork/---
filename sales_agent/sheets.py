@@ -93,7 +93,8 @@ class Sheets:
         health = [HEALTH_HEADERS] + [[r[0],datevalue(r[1]),*r[2:]] for r in store.db.execute("SELECT url,checked,status,detail FROM source_health ORDER BY url")]
         runs = [RUN_HEADERS] + [[datevalue(r[0]),datevalue(r[1]),*r[2:]] for r in store.db.execute("SELECT started,finished,status,sources,leads,detail FROM runs ORDER BY id DESC LIMIT 100")]
         writes.extend([{"range":f"'Источники'!A1:D{len(health)}", "values":health},
-            {"range":f"'Работа агента'!A9:F{8+len(runs)}", "values":runs}])
+            {"range":f"'Работа агента'!A9:F{8+len(runs)}", "values":runs},
+            {"range":"'Работа агента'!B8:C8", "values":[['Обновлено UTC',datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')]]}])
         # RAW means source text beginning with '=' is never executed as a formula.
         self.api("POST", "/values:batchUpdate", json={"valueInputOption":"RAW", "data":writes})
         store.set_state("last_synced", __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())

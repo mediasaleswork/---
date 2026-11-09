@@ -82,7 +82,7 @@ def parse_telegram(raw, channel):
     for node in soup.select(".tgme_widget_message[data-post]"):
         post = node.get("data-post", "")
         text = node.select_one(".tgme_widget_message_text")
-        time = node.select_one("time[datetime]")
+        time = node.select_one(".tgme_widget_message_date time[datetime]") or node.select_one("time[datetime]")
         if not text or not time or not re.fullmatch(re.escape(channel) + r"/\d+", post, flags=re.I):
             continue
         try:

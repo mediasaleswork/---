@@ -9,7 +9,7 @@ from sales_agent.config import Config
 from sales_agent.research import validate, Deferred
 from sales_agent.rules import RuleResearcher
 from sales_agent.runner import cycle, due
-from sales_agent.sheets import Sheets, LEAD_HEADERS, SCRIPT_HEADERS
+from sales_agent.sheets import Sheets, LEAD_HEADERS, SCRIPT_HEADERS, lead_row
 from sales_agent.sources import parse_feed, parse_telegram, relevant
 from sales_agent.store import Store
 
@@ -95,6 +95,15 @@ class SalesTests(unittest.TestCase):
         self.assertEqual(rows[0]['url'],'https://t.me/spotuz/123')
         self.assertFalse(parse_telegram(html,'other_channel'))
         self.assertTrue(relevant(rows[0]))
+
+    def test_post_date_uses_current_publication_not_forwarded_date(self):
+        html='<div class="tgme_widget_message" data-post="spotuz/123"><div class="tgme_widget_message_forwarded_from"><time datetime="2026-11-01T00:00:00Z"></time></div><div class="tgme_widget_message_text">'+TEXT+'</div><a class="tgme_widget_message_date"><time datetime="2026-11-09T22:15:00Z"></time></a></div>'
+        row=parse_telegram(html,'spotuz')[0]
+        self.assertEqual(row['published'],'2026-11-09T22:15:00+00:00')
+        lead=validate(candidate(self.source['id']),{self.source['id']:dict(self.source,published=row['published'])},NOW)
+        self.store.add_lead(lead)
+        displayed=datetime(1899,12,30)+timedelta(days=lead_row(lead)[5])
+        self.assertEqual(displayed.strftime('%Y-%m-%d %H:%M'),'2026-11-10 03:15')
 
     def test_manual_edits_and_sorted_rows_preserved_and_formula_text_raw(self):
         lead=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)

@@ -2,26 +2,27 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 from google.auth import load_credentials_from_file
 from google.auth.transport.requests import AuthorizedSession
 
-LEAD_HEADERS = ["ID", "Компания", "Ниша", "Приоритет", "Подтверждённый факт", "Дата сигнала", "Услуга", "Гипотеза потребности", "Источник", "Контактный маршрут", "CRM-проверка", "Статус", "Следующий шаг", "Дата следующего контакта", "Заметки команды", "Проверено UTC", "Уверенность"]
+LEAD_HEADERS = ["ID", "Компания", "Ниша", "Приоритет", "Подтверждённый факт", "Дата публикации (Ташкент)", "Услуга", "Гипотеза потребности", "Источник", "Контактный маршрут", "CRM-проверка", "Статус", "Следующий шаг", "Дата следующего контакта", "Заметки команды", "Проверено UTC", "Уверенность"]
 SCRIPT_HEADERS = ["ID", "Компания", "Первое сообщение", "Повторное касание", "Сценарий звонка", "Ответы на возражения"]
 HEALTH_HEADERS = ["Источник", "Проверено UTC", "Статус", "Результат"]
 RUN_HEADERS = ["Начало UTC", "Завершение UTC", "Статус", "Публикаций в периоде", "Новых лидов", "Результат"]
 
 
-def datevalue(value):
+def datevalue(value,tz_name='UTC'):
     if not value:
         return ""
-    return (datetime.fromisoformat(value).astimezone(timezone.utc).replace(tzinfo=None) - datetime(1899,12,30)).total_seconds()/86400
+    return (datetime.fromisoformat(value).astimezone(ZoneInfo(tz_name)).replace(tzinfo=None) - datetime(1899,12,30)).total_seconds()/86400
 
 
-def lead_row(lead):
+def lead_row(lead,tz_name='Asia/Tashkent'):
     return [lead["id"],lead["company"],lead["sector"],lead["priority"],lead["evidence_quote"],
-        datevalue(lead["published"]),lead["service"],lead["hypothesis"],lead["source_url"],lead["contact"],
+        datevalue(lead["published"],tz_name),lead["service"],lead["hypothesis"],lead["source_url"],lead["contact"],
         "Не сверено", "Новый", "Сверить с клиентской базой и найти контакт маркетинга", "", "", datevalue(lead["checked"]), lead["confidence"]]
 
 
@@ -32,6 +33,7 @@ class Sheets:
         creds, _ = load_credentials_from_file(str(cfg.credentials_file), scopes=["https://www.googleapis.com/auth/spreadsheets"])
         self.session = AuthorizedSession(creds)
         self.base = "https://sheets.googleapis.com/v4/spreadsheets/" + cfg.spreadsheet_id
+        self.timezone=cfg.timezone
 
     def api(self, method, path="", **kwargs):
         response = self.session.request(method, self.base + path, timeout=(10, 45), **kwargs)
@@ -61,7 +63,7 @@ class Sheets:
         # Key by stable ID, never by row order. Existing rows and manual edits stay intact.
         existing = {str(r[0]) for r in leads[1:] if r}
         existing_scripts = {str(r[0]) for r in scripts[1:] if r}
-        new_leads = [lead_row(l) for l in store.leads() if l["id"] not in existing]
+        new_leads = [lead_row(l,self.timezone) for l in store.leads() if l["id"] not in existing]
         new_scripts = [[l["id"],l["company"],*(l["scripts"][k] for k in ("first","followup","call","objections"))]
             for l in store.leads() if l["id"] not in existing_scripts]
         if len(leads) + len(new_leads) >= 5000 or len(scripts) + len(new_scripts) >= 5000:
@@ -85,8 +87,8 @@ class Sheets:
                 if table.get('name') in {'MediasalesLeads','MediasalesScripts'} and table['range'].get('endRowIndex',0)<previous+len(additions):
                     structure.append({'updateTable':{'table':{'tableId':table['tableId'],'range':dict(table['range'],endRowIndex=previous+len(additions))},'fields':'range'}})
             if name=='Лиды':
-                for column,pattern in [(5,'yyyy-mm-dd'),(15,'yyyy-mm-dd hh:mm')]:
-                    structure.append({'repeatCell':{'range':{'sheetId':sid,'startRowIndex':previous,'endRowIndex':previous+len(additions),'startColumnIndex':column,'endColumnIndex':column+1},
+                for column,pattern in [(5,'dd.mm.yyyy hh:mm'),(15,'yyyy-mm-dd hh:mm')]:
+                    structure.append({'repeatCell':{'range':{'sheetId':sid,'startRowIndex':1 if column==5 else previous,'endRowIndex':previous+len(additions),'startColumnIndex':column,'endColumnIndex':column+1},
                         'cell':{'userEnteredFormat':{'numberFormat':{'type':'DATE_TIME','pattern':pattern}}},'fields':'userEnteredFormat.numberFormat'}})
         if structure:
             self.api('POST',':batchUpdate',json={'requests':structure})

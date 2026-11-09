@@ -13,6 +13,14 @@ from .parsing import MatchResult, match_ad, _normalize
 def offline_match(messages, placement):
     content = combined_content(messages)
     media = set(json.loads(placement.get("media_keys") or "[]"))
+    if placement.get("ad_type") == "рекламный материал":
+        source = _normalize(placement["source_text"])
+        actual = _normalize(content.text)
+        if media.intersection(content.media) and source == actual:
+            return MatchResult(True, "offline:совпадают текст и согласованное медиа")
+        if not media and len(source) >= 60 and match_ad(content.text, [placement["source_text"]], []).matched:
+            return MatchResult(True, "offline:совпадает полный текст рекламного материала")
+        return MatchResult(False, "")
     if media.intersection(content.media):
         return MatchResult(True, "offline:тот же согласованный Telegram-материал")
     fields = {} if placement.get("ad_type") == "рекламный материал" else _fields(placement["source_text"])

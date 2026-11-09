@@ -72,6 +72,16 @@ class ForwardedIntakeTests(unittest.IsolatedAsyncioTestCase):
             self.consume(image_message(1))
         self.assertFalse(self.store.rows("SELECT * FROM source_messages"))
 
+    async def test_offline_matching_does_not_use_shared_footer_or_reused_bank_logo(self):
+        from partner_monitor.fallback import offline_match
+        footer = "Следите за новостями нашего банка, узнавайте о новых предложениях и возможностях для бизнеса."
+        self.consume(image_message(1, "Лизинг оборудования на 12 месяцев.\n\n" + footer, photo=900))
+        placement = self.store.rows("SELECT * FROM placements")[0]
+        self.assertFalse(offline_match([image_message(7, "Документальный фильм.\n\n" + footer, photo=900, peer=200)], placement).matched)
+        self.assertFalse(offline_match([message(8, "Совсем другая услуга.\n\n" + footer)], placement).matched)
+        self.assertTrue(offline_match([image_message(9, placement["source_text"], photo=900, peer=200)], placement).matched)
+        self.assertFalse(offline_match([image_message(10, placement["source_text"], photo=901, peer=200)], placement).matched)
+
     async def test_new_folder_channel_receives_existing_active_material(self):
         self.consume(image_message(1, "Услуга лизинга"))
         self.intake.config = replace(self.config, allowed_channels=(*self.config.allowed_channels, "new_channel"))

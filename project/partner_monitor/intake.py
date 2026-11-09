@@ -72,7 +72,7 @@ class ConversationIntake:
                           None, (), (), "", True)
         else:
             brief = parse_brief(text, [], created, self.config.timezone, self.config.default_window_days)
-        keywords = creative_cues(text, brief, fields)
+        keywords = ([text] if text else []) if self.config.forwarded_intake else creative_cues(text, brief, fields)
         issues = []
         for name in names:
             ref = target_reference(name)

@@ -56,7 +56,8 @@ class ForwardedIntakeTests(unittest.IsolatedAsyncioTestCase):
         placements = self.store.rows("SELECT * FROM placements")
         self.assertEqual(len(placements), 3)
         self.assertEqual({p["client_name"] for p in placements}, {self.config.default_client})
-        self.assertEqual({p["starts_at"] for p in placements}, {NOW.isoformat()})
+        from partner_monitor.intake import publication_day_start
+        self.assertEqual({p["starts_at"] for p in placements}, {publication_day_start(NOW, self.config.timezone)})
         self.assertTrue(all(not p["review_reason"] for p in placements))
 
     async def test_repeated_same_material_does_not_create_competing_campaigns(self):
@@ -137,3 +138,22 @@ class ForwardedIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(r["anchor_id"] for r in self.store.rows("SELECT * FROM intake_drafts")), [1, 2])
         self.assertEqual(len(self.store.rows("SELECT * FROM source_messages")), 2)
         self.assertEqual(len(self.store.rows("SELECT * FROM placements")), 2)
+
+    async def test_already_published_post_before_forward_is_found_and_not_duplicated(self):
+        config = replace(self.config, allowed_channels=("partner_one",))
+        self.intake.config = config
+        source = image_message(1, "Ролик об истории бизнеса")
+        self.consume(source)
+        earlier = image_message(7, source.message, peer=200)
+        earlier.date = NOW - timedelta(minutes=30)
+        from partner_monitor.intake import publication_day_start
+        if earlier.date.isoformat() < publication_day_start(NOW, config.timezone):
+            earlier.date = NOW
+        client = FakeClient([], [earlier])
+        capture = FakeCapture()
+        monitor = Monitor(config, self.store, client, capture)
+        with patch("partner_monitor.engine.asyncio.sleep", new=AsyncMock()):
+            await monitor.tick()
+            await monitor.tick()
+        self.assertEqual(len(self.store.rows("SELECT * FROM posts")), 1)
+        self.assertEqual(len(capture.calls), 1)

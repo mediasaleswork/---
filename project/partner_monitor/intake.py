@@ -5,7 +5,8 @@ approvals are recorded for review, never applied across unrelated adverts.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import json
 import logging
 import re
@@ -15,6 +16,10 @@ from .parsing import PartnerReference, _normalize
 from .storage import utcnow
 from .scope import target_key, target_reference
 log = logging.getLogger(__name__)
+
+
+def publication_day_start(created, tz):
+    return created.astimezone(ZoneInfo(tz)).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
 
 
 def packed(value):
@@ -67,7 +72,7 @@ class ConversationIntake:
             # Dates, usernames and words like "Клиент:" inside an advert are
             # content, not operational instructions or an implicit direct link.
             brief = Brief(draft["name"], "рекламный материал", "",
-                          created.isoformat(),
+                          publication_day_start(created, self.config.timezone),
                           (created + timedelta(days=self.config.default_window_days)).isoformat(),
                           None, (), (), "", True)
         else:
@@ -273,3 +278,20 @@ class ConversationIntake:
             if new:
                 self._sync(draft, received, new, approved=True)
                 self.store.execute("UPDATE intake_drafts SET target_refs=? WHERE id=?", (packed(list(dict.fromkeys(previous + new))), draft["id"]))
+
+    def reconcile_publication_windows(self):
+        if not self.config.forwarded_intake:
+            return
+        # A forwarded channel post may already be live before it reaches the
+        # source chat. Replay that publication day without duplicating evidence.
+        partners = set()
+        for p in self.store.rows("""SELECT p.id,p.partner_id,p.starts_at,d.created_at FROM placements p
+          JOIN intake_drafts d ON d.id=p.draft_id WHERE p.ad_type='рекламный материал'
+          AND p.status NOT IN ('dismissed','needs_review')"""):
+            start = publication_day_start(datetime.fromisoformat(p["created_at"]), self.config.timezone)
+            if p["starts_at"] != start:
+                self.store.execute("UPDATE placements SET starts_at=?,scan_complete=0 WHERE id=?", (start,p["id"]))
+                partners.add(p["partner_id"])
+        for pid in partners:
+            self.store.execute("UPDATE partners SET last_message_id=0 WHERE id=?", (pid,))
+            self.store.execute("UPDATE campaign_checks SET status='obsolete',reason='Расширен день поиска публикаций' WHERE partner_id=? AND status IN ('pending','error','review')", (pid,))

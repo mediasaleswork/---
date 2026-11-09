@@ -64,6 +64,9 @@ class Monitor:
         if config.campaign_matching:
             from .campaigns import CampaignWorker
             self.campaign_worker = CampaignWorker(self)
+        if config.forwarded_intake:
+            from .intake import ConversationIntake
+            ConversationIntake(store, config).reconcile_publication_windows()
 
     async def refresh_channel_folder(self):
         if not self.config.channel_folder or asyncio.get_running_loop().time() < self._folder_checked:

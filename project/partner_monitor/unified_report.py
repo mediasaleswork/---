@@ -280,8 +280,14 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         post = post_by_id[snap["post_id"]]
         for col, value in [(3, post.get("published_at")), (4, snap.get("checked_at")), (10, snap.get("due_at")), (11, snap.get("screenshot_at"))]:
             date_cell(history_sheet, row, col, local(value, tz))
-        # The report's current shot remains available even if the channel is gone.
-        jump(history_sheet.cell(row, 7), "Отчёт", f"A{anchors[post['id']]}", "Текущий снимок")
+        # Historical measurements must link to THEIR original evidence, rather
+        # than silently following the newest preview in the main report.
+        if snap.get("screenshot_url"):
+            cell = history_sheet.cell(row, 7)
+            cell.value = "Снимок: " + ("сразу" if snap["due_key"] == "initial" else snap["due_key"])
+            cell.hyperlink = snap["screenshot_url"]
+        else:
+            jump(history_sheet.cell(row, 7), "Отчёт", f"A{anchors[post['id']]}", "Текущий снимок")
     briefs[0] = briefs[0] + ["Инструмент", "Язык", "План публикаций"]
     flat_briefs = [b for p in partners for b in p.get("placements", [])]
     brief_lookup = {b["id"]: b for b in flat_briefs}

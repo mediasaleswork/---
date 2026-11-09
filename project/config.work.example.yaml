@@ -15,6 +15,7 @@ keywords: []
 domains: []
 timezone: Asia/Tashkent
 interval_seconds: 60
+google_sync_interval_seconds: 900  # Google Sheet writes, separate from Telegram polling.
 default_window_days: 7
 milestones_hours: [24, 48]
 campaign_matching: true

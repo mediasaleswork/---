@@ -31,6 +31,8 @@ def prepare_config(root: Path, environment):
                             ("GOOGLE_CREDENTIALS_FILE", "google_credentials")):
         if environment.get(variable, "").strip():
             data[field] = environment[variable].strip()
+    if environment.get("GOOGLE_SYNC_INTERVAL_SECONDS", "").strip():
+        data["google_sync_interval_seconds"] = int(environment["GOOGLE_SYNC_INTERVAL_SECONDS"])
     if environment.get("CAMPAIGN_MATCHING", "").strip():
         value = environment["CAMPAIGN_MATCHING"].strip().lower()
         if value not in {"true", "false"}:

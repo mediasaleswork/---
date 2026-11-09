@@ -43,6 +43,13 @@ class ConfigTests(unittest.TestCase):
         config = self.load("google_credentials: secrets/google.json\n")
         self.assertEqual(config.google_credentials, self.path.parent / "secrets" / "google.json")
 
+    def test_sheet_refresh_defaults_to_fifteen_minutes_and_rejects_rapid_rewrites(self):
+        self.assertEqual(self.load("").google_sync_interval_seconds, 900)
+        self.assertEqual(self.load("google_sync_interval_seconds: 1800\n").google_sync_interval_seconds, 1800)
+        for value in ("5", "899", "86401", "true", "900.5", "'900'"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "google_sync_interval_seconds"):
+                self.load("google_sync_interval_seconds: " + value + "\n")
+
     def test_realtime_limit_cannot_exceed_telegram_maximum(self):
         self.assertEqual(self.load("realtime_channel_limit: 10\n").realtime_channel_limit, 10)
         self.assertEqual(self.load("realtime_channel_limit: 0\n").realtime_channel_limit, 0)

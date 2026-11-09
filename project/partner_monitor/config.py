@@ -41,6 +41,7 @@ class Config:
     forwarded_intake: bool = False
     source_since: str = ""
     source_title: str = ""
+    google_sync_interval_seconds: int = 900
 
     @property
     def runtime_dir(self) -> Path:
@@ -93,6 +94,7 @@ def load_config(path: Path) -> Config:
     allowed.update({"campaign_matching", "campaign_provider", "campaign_model", "campaign_daily_limit", "campaign_batch_size", "campaign_total_limit"})
     allowed.update({"channel_folder", "channel_folder_watch"})
     allowed.update({"forwarded_intake", "source_since", "source_title"})
+    allowed.add("google_sync_interval_seconds")
     unknown = set(data) - allowed
     if unknown:
         raise ValueError("Неизвестные настройки: " + ", ".join(sorted(unknown)))
@@ -107,6 +109,10 @@ def load_config(path: Path) -> Config:
     if not isinstance(source, (str, int)):
         raise ValueError("source_group: укажите @username или числовой ID группы")
     numbers = {k: int(data.get(k, default)) for k, default in (("interval_seconds", 300), ("lookback_days", 7), ("batch_size", 200), ("default_window_days", 7))}
+    sync_interval = data.get("google_sync_interval_seconds", 900)
+    if type(sync_interval) is not int or not 900 <= sync_interval <= 86400:
+        raise ValueError("google_sync_interval_seconds: целое число от 900 до 86400")
+    numbers["google_sync_interval_seconds"] = sync_interval
     if numbers["interval_seconds"] < 30 or not 1 <= numbers["lookback_days"] <= 365 or not 1 <= numbers["batch_size"] <= 1000:
         raise ValueError("interval_seconds >= 30, lookback_days: 1–365, batch_size: 1–1000")
     if not 1 <= numbers["default_window_days"] <= 365:

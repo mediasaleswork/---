@@ -537,29 +537,13 @@ class Monitor:
 
 
 async def publish_reports(config, store):
-    from .reports import export_xlsx
-    await asyncio.to_thread(export_xlsx, *store.dump(), config.runtime_dir / "report.xlsx", timezone=config.timezone)
-    if config.google_credentials and config.spreadsheet_id:
-        try:
-            from .reports import GoogleReporter
-            reporter = GoogleReporter(config.google_credentials, config.spreadsheet_id, config.drive_folder_id, config.timezone)
-            uploaded = await asyncio.to_thread(reporter.sync, *store.dump())
-            for sid, url in uploaded.items():
-                store.execute("UPDATE snapshots SET screenshot_url=? WHERE id=?", (url, int(sid)))
-        except Exception as exc:
-            log.warning("Google Sheets не синхронизирован (%s); локальный отчёт сохранён, повторим позже", type(exc).__name__)
+    from .publishing import publish_reports as publish
+    await publish(config, store)
 
 
 async def report_loop(monitor):
-    while True:
-        await monitor.changed.wait()
-        monitor.changed.clear()
-        try:
-            await publish_reports(monitor.config, monitor.store)
-        except Exception as exc:
-            log.warning("Отчёт временно недоступен: %s; повторим", type(exc).__name__)
-            await asyncio.sleep(5)
-            monitor.changed.set()
+    from .publishing import report_loop as publish_loop
+    await publish_loop(monitor, publish_reports)
 
 
 async def run(config: Config, *, once: bool = False):

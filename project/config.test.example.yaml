@@ -17,6 +17,7 @@ keywords: []
 domains: []
 timezone: Asia/Tashkent
 interval_seconds: 300
+google_sync_interval_seconds: 900
 milestones_hours: [24, 48]
 spreadsheet_id: ""
 google_credentials: ""

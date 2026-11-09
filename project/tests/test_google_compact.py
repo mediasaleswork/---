@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from openpyxl import load_workbook
 
-from partner_monitor.google_compact import REPORT_SHEETS, MARKER, VALUE, SHEETS, replace_workbook, sync_compact, verify_target
+from partner_monitor.google_compact import REPORT_SHEETS, MARKER, VALUE, SHEETS, replace_workbook, sync_compact, verify_target, verify_history_preserved
 from partner_monitor.reports import GoogleReporter
 import test_unified_report
 
@@ -22,9 +22,14 @@ class CompactGoogleTests(unittest.TestCase):
         self.reporter.timezone = "Asia/Tashkent"
         self.reporter.layout = "compact"
         self.calls = []
+        self.saved_posts = []
+        self.saved_history = []
 
     def metadata(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
+        if url.endswith("/values:batchGet"):
+            return {"valueRanges": [{"values": [["Ссылка на пост"], *self.saved_posts]},
+                {"values": [["Ссылка на пост", "Дата", "Замер", "Просмотры", "Контрольная точка", "Снимок", "Статус"], *self.saved_history]}]}
         if "drive/v3/files" in url:
             return {"mimeType": SHEETS, "appProperties": {MARKER: VALUE}}
         return {"sheets": [{"properties": {"title": n, "sheetId": i}} for i, n in enumerate(REPORT_SHEETS)]}
@@ -77,6 +82,58 @@ class CompactGoogleTests(unittest.TestCase):
         self.data.partners[0]["placements"][0]["contract_key"]="contract-a"
         groups=build_view(self.data.partners,self.data.posts,self.data.snapshots)["summary"]
         self.assertEqual([(g["client"],g["plan"],g["total"],g["remaining"]) for g in groups],[("Client A",10,4,6),("Client B",5,1,4)])
+
+    def test_empty_database_cannot_replace_a_populated_report(self):
+        self.saved_posts = [[self.data.posts[0]["url"]]]
+        self.reporter._json = self.metadata
+        self.reporter._upload = Mock()
+        with patch("partner_monitor.google_compact.replace_workbook") as replace:
+            with self.assertRaisesRegex(ValueError, "Защита истории"):
+                self.reporter.sync([], [], [])
+            replace.assert_not_called()
+            self.reporter._upload.assert_not_called()
+
+    def test_losing_an_old_measurement_or_successful_picture_blocks_replacement(self):
+        self.reporter._json = self.metadata
+        self.reporter._upload = Mock(return_value=None)
+        url = self.data.posts[0]["url"]
+        self.saved_posts = [[url]]
+        self.saved_history = [[url, "", "", 11, "initial", "", "ok"]]
+        for snapshots in ([], [dict(self.data.snapshots[0], screenshot_path=None, screenshot_url=None)]):
+            with self.subTest(snapshots=snapshots), patch("partner_monitor.google_compact.replace_workbook") as replace:
+                with self.assertRaisesRegex(ValueError, "Защита истории"):
+                    self.reporter.sync(self.data.partners, self.data.posts, snapshots)
+                replace.assert_not_called()
+
+    def test_deleted_telegram_post_and_both_historical_captures_are_retained(self):
+        self.reporter._json = self.metadata
+        self.reporter._upload = Mock(side_effect=lambda s: s.get("screenshot_url"))
+        self.data.posts[0]["status"] = "unavailable"
+        first, second = self.data.snapshots
+        first["screenshot_url"] = "https://drive.google.com/file/d/initial-private/view"
+        second.update(screenshot_status="ok", screenshot_path=str(self.data.new), screenshot_url="https://drive.google.com/file/d/day-one-private/view")
+        self.saved_posts = [[self.data.posts[0]["url"]]]
+        self.saved_history = [[self.data.posts[0]["url"], "", "", s["views"], s["due_key"], "", "ok"] for s in self.data.snapshots]
+        captures = []
+        with patch("partner_monitor.google_compact.replace_workbook", side_effect=lambda r,p: captures.append(Path(p).read_bytes())):
+            self.reporter.sync(self.data.partners, self.data.posts, self.data.snapshots)
+        book = load_workbook(BytesIO(captures[0])); self.addCleanup(book.close)
+        self.assertEqual([book["История просмотров"].cell(r,7).hyperlink.target for r in (2,3)], [first["screenshot_url"],second["screenshot_url"]])
+        self.assertEqual(book["Реестр публикаций"]["D2"].value, self.data.posts[0]["url"])
+        self.assertEqual(book["Недоступные посты"].max_row, 3)
+
+    def test_corrupted_remote_picture_is_never_used_to_replace_saved_evidence(self):
+        self.reporter._json = self.metadata
+        self.reporter._upload = Mock(return_value=None)
+        self.saved_posts = [[self.data.posts[0]["url"]]]
+        self.saved_history = [[self.data.posts[0]["url"], "", "", 11, "initial", "", "ok"]]
+        self.data.old.unlink()
+        self.data.snapshots[0]["screenshot_url"] = "https://drive.google.com/file/d/initial-private/view"
+        self.reporter.session = Mock(request=Mock(return_value=Mock(content=b"not a valid image")))
+        with patch("partner_monitor.google_compact.replace_workbook") as replace:
+            with self.assertRaisesRegex(ValueError, "изображения не восстановлены"):
+                self.reporter.sync(self.data.partners, self.data.posts, self.data.snapshots)
+            replace.assert_not_called()
 
     def test_private_drive_evidence_can_be_restored_when_local_file_is_missing(self):
         self.reporter._json = self.metadata

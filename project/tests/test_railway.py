@@ -48,6 +48,11 @@ class RailwayTests(unittest.TestCase):
         self.assertNotIn('secret-test-value', text)
         self.assertNotIn('TELEGRAM_API_HASH', yaml.safe_load(text))
 
+    def test_google_sync_interval_environment_is_separate_from_telegram_polling(self):
+        config = prepare_config(self.root, {'GOOGLE_SYNC_INTERVAL_SECONDS': '900'})
+        self.assertEqual(config.google_sync_interval_seconds, 900)
+        self.assertEqual(config.interval_seconds, 300)
+
     def test_run_requires_group_before_opening_telegram(self):
         with patch('deploy.railway_entrypoint.verify_account') as verify:
             with self.assertRaisesRegex(ValueError, 'SOURCE_GROUP'):

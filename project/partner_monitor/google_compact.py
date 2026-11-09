@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 from urllib.parse import urlsplit
+from PIL import Image
 
 REPORT_SHEETS = ("Отчёт", "Недоступные посты", "Реестр публикаций", "История просмотров", "Партнёры")
 HIDDEN_SHEETS = frozenset(REPORT_SHEETS[2:])
@@ -28,6 +29,43 @@ def verify_target(reporter):
         m.get("metadataKey") == MARKER and m.get("metadataValue") == VALUE for m in sheet.get("developerMetadata", []))
     if metadata.get("mimeType") != SHEETS or not owned or names != set(REPORT_SHEETS):
         raise ValueError("Компактный отчёт: нужна отдельная копия шаблона с отметкой partner_monitor_compact=v1 и пятью листами образца")
+    return sheet
+
+
+def valid_picture(path):
+    if not path or not Path(path).is_file():
+        return False
+    try:
+        with Image.open(path) as picture:
+            picture.verify()
+        return True
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return False
+
+
+def verify_history_preserved(reporter, posts, snapshots, metadata=None):
+    metadata = metadata or reporter._json("GET", f"https://sheets.googleapis.com/v4/spreadsheets/{reporter.spreadsheet_id}", params={"fields": "sheets.properties"})
+    grids = {s["properties"]["title"]: s["properties"].get("gridProperties", {}).get("rowCount", 1000) for s in metadata["sheets"]}
+    result = reporter._json("GET", f"https://sheets.googleapis.com/v4/spreadsheets/{reporter.spreadsheet_id}/values:batchGet", params={
+        "ranges": [f"'Реестр публикаций'!D1:D{grids['Реестр публикаций']}", f"'История просмотров'!B1:H{grids['История просмотров']}"],
+        "valueRenderOption": "UNFORMATTED_VALUE"})
+    ranges = result.get("valueRanges", [])
+    if len(ranges) != 2:
+        raise ValueError("Не удалось проверить сохранность существующего отчёта")
+    registry, history = (r.get("values", []) for r in ranges)
+    if not registry or registry[0] != ["Ссылка на пост"] or not history or len(history[0]) < 5 or history[0][0] != "Ссылка на пост" or history[0][4] != "Контрольная точка":
+        raise ValueError("Неизвестные заголовки истории; замена отчёта запрещена")
+    old_posts = {r[0] for r in registry[1:] if r and r[0]}
+    known = {p["url"] for p in posts}
+    post_urls = {p["id"]: p["url"] for p in posts}
+    old_checks = {(r[0], str(r[4])) for r in history[1:] if len(r) > 4 and r[0]}
+    checks = {(post_urls.get(s["post_id"]), str(s["due_key"])) for s in snapshots}
+    successful = {(r[0], str(r[4])) for r in history[1:] if len(r) > 6 and r[6] in {"ok", "success"}}
+    images = {(post_urls.get(s["post_id"]), str(s["due_key"])) for s in snapshots
+              if s.get("screenshot_status") in {"ok", "success"} and (valid_picture(s.get("screenshot_path")) or s.get("screenshot_url"))}
+    if not old_posts.issubset(known) or not old_checks.issubset(checks) or not successful.issubset(images):
+        raise ValueError("Защита истории: выгрузка потеряла сохранённые публикации, замеры или снимки; таблица не изменена")
+    return successful
 
 
 def replace_workbook(reporter, path):
@@ -51,7 +89,7 @@ def replace_workbook(reporter, path):
 def restore_pictures(reporter, snapshots, scratch):
     for snapshot in snapshots:
         path = snapshot.get("screenshot_path")
-        if path and Path(path).is_file():
+        if valid_picture(path):
             continue
         if snapshot.get("screenshot_status") not in {"ok", "success"}:
             continue
@@ -70,7 +108,8 @@ def restore_pictures(reporter, snapshots, scratch):
 
 
 def sync_compact(reporter, partners, posts, snapshots):
-    verify_target(reporter)
+    metadata = verify_target(reporter)
+    protected = verify_history_preserved(reporter, posts, snapshots, metadata)
     from .unified_report import export_unified
     from .report_view import build_view
     copies = [dict(s) for s in snapshots]
@@ -82,6 +121,10 @@ def sync_compact(reporter, partners, posts, snapshots):
             links[str(snapshot["id"])] = url
     with tempfile.TemporaryDirectory(prefix="partner-google-") as scratch:
         restore_pictures(reporter, copies, scratch)
+        urls = {p["id"]: p["url"] for p in posts}
+        available = {(urls.get(s["post_id"]), str(s["due_key"])) for s in copies if valid_picture(s.get("screenshot_path"))}
+        if not protected.issubset(available):
+            raise ValueError("Сохранённые изображения не восстановлены; таблица не изменена")
         output = Path(scratch) / "report.xlsx"
         export_unified(partners, posts, copies, output, reporter.timezone, compact=True)
         view = build_view(partners, posts, copies, reporter.timezone)

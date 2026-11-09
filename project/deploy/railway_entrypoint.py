@@ -20,7 +20,8 @@ def prepare_config(root: Path, environment):
     path = root / "config.yaml"
     configured = environment.get("MONITOR_CONFIG_FILE", "").strip()
     source = Path(configured) if configured else path if path.exists() else root / "config.example.yaml"
-    data = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    supplied = environment.get("MONITOR_CONFIG_YAML", "").strip()
+    data = yaml.safe_load(supplied if supplied else source.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("config.yaml must contain a YAML mapping")
     if environment.get("SOURCE_GROUP", "").strip():

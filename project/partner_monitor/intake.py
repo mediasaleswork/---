@@ -7,12 +7,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
+import logging
 import re
 
-from .briefs import _fields, parse_brief
+from .briefs import Brief, _fields, parse_brief
 from .parsing import PartnerReference, _normalize
 from .storage import utcnow
 from .scope import target_key, target_reference
+log = logging.getLogger(__name__)
 
 
 def packed(value):
@@ -57,10 +59,19 @@ class ConversationIntake:
     def _sync(self, draft, received, targets=None, *, approved=False, direct=None, invalidate=False):
         direct = direct or {}
         names = targets if targets is not None else json.loads(draft["target_refs"])
-        fields = _fields(draft["creative_text"])
+        fields = {} if self.config.forwarded_intake else _fields(draft["creative_text"])
         # Use explicitly supplied search cues, otherwise the actual creative.
         text = draft["creative_text"]
-        brief = parse_brief(text, [], datetime.fromisoformat(draft["created_at"]), self.config.timezone, self.config.default_window_days)
+        created = datetime.fromisoformat(draft["created_at"])
+        if self.config.forwarded_intake:
+            # Dates, usernames and words like "Клиент:" inside an advert are
+            # content, not operational instructions or an implicit direct link.
+            brief = Brief(draft["name"], "рекламный материал", "",
+                          created.isoformat(),
+                          (created + timedelta(days=self.config.default_window_days)).isoformat(),
+                          None, (), (), "", True)
+        else:
+            brief = parse_brief(text, [], created, self.config.timezone, self.config.default_window_days)
         keywords = creative_cues(text, brief, fields)
         issues = []
         for name in names:
@@ -108,6 +119,9 @@ class ConversationIntake:
 
     def consume(self, chat, message, content, refs):
         if self.store.rows("SELECT message_id FROM source_messages WHERE source_chat_id=? AND message_id=?", (str(chat), message.id)):
+            return
+        if self.config.forwarded_intake:
+            self.consume_forwarded(chat, message, content)
             return
         text = content.text.strip()
         normalized = _normalize(text)
@@ -213,3 +227,49 @@ class ConversationIntake:
             self._sync(draft, message.date, scope, invalidate=changed or preview)
         self._log(chat, message, content, draft, targets or all_targets,
                   "publication" if direct else "preview" if preview else "material" if creative else "context")
+
+    def consume_forwarded(self, chat, message, content):
+        text = content.text.strip()
+        document = getattr(message, "document", None)
+        if document and not getattr(document, "mime_type", "").startswith(("image/", "video/")):
+            self._log(chat, message, content, None, [], "ignored")
+            return
+        if not (getattr(message, "fwd_from", None) or content.media) or not (text or content.media):
+            self._log(chat, message, content, None, [], "ignored")
+            return
+        targets = list(self.config.allowed_channels)
+        if not targets:
+            # The source cursor must not discard materials when the folder is
+            # temporarily unavailable. Retry the same source batch next tick.
+            raise OSError("Папка каналов пока не прочитана; материал не пропущен")
+        media = packed(content.media)
+        cutoff = (message.date - timedelta(days=self.config.default_window_days)).isoformat()
+        identical = self.store.rows("""SELECT * FROM intake_drafts WHERE source_chat_id=? AND creative_text=?
+          AND media_keys=? AND status='approved' AND created_at>=? ORDER BY id DESC LIMIT 1""", (str(chat), text, media, cutoff))
+        if identical:
+            draft = identical[0]
+            new = [name for name in targets if name not in json.loads(draft["target_refs"])]
+            if new:
+                self._sync(draft, message.date, new, approved=True)
+                self.store.execute("UPDATE intake_drafts SET target_refs=? WHERE id=?", (packed(targets), draft["id"]))
+            self._log(chat, message, content, draft, targets, "duplicate")
+            return
+        name = next((line.strip()[:100] for line in text.splitlines() if line.strip()), f"Рекламный материал №{message.id}")
+        self.store.execute("""INSERT INTO intake_drafts(source_chat_id,anchor_id,name,client_name,creative_text,
+          media_keys,target_refs,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'approved',?,?)""",
+          (str(chat), message.id, name, self.config.default_client, text, media, packed(targets), message.date.isoformat(), message.date.isoformat()))
+        draft = self.store.rows("SELECT * FROM intake_drafts WHERE source_chat_id=? AND anchor_id=?", (str(chat), message.id))[0]
+        self._sync(draft, message.date, targets, approved=True)
+        self._log(chat, message, content, draft, targets, "material")
+        log.info("Рекламный материал #%s принят из группы; площадок %s", message.id, len(targets))
+
+    def attach_folder_channels(self, received):
+        if not self.config.forwarded_intake:
+            return
+        cutoff = (received - timedelta(days=self.config.default_window_days)).isoformat()
+        for draft in self.store.rows("SELECT * FROM intake_drafts WHERE status='approved' AND created_at>=?", (cutoff,)):
+            previous = json.loads(draft["target_refs"])
+            new = [name for name in self.config.allowed_channels if name not in previous]
+            if new:
+                self._sync(draft, received, new, approved=True)
+                self.store.execute("UPDATE intake_drafts SET target_refs=? WHERE id=?", (packed(list(dict.fromkeys(previous + new))), draft["id"]))

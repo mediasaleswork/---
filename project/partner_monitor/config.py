@@ -38,6 +38,9 @@ class Config:
     campaign_total_limit: int = 0
     channel_folder: str = ""
     channel_folder_watch: bool = False
+    forwarded_intake: bool = False
+    source_since: str = ""
+    source_title: str = ""
 
     @property
     def runtime_dir(self) -> Path:
@@ -67,6 +70,8 @@ class Config:
             raise ValueError("conversation_mode: задайте явный список allowed_channels")
         if self.campaign_matching and (not self.conversation_mode or not (self.allowed_channels or folder_scope)):
             raise ValueError("campaign_matching: нужны conversation_mode и allowed_channels")
+        if self.forwarded_intake and not self.conversation_mode:
+            raise ValueError("forwarded_intake: нужен conversation_mode")
 
     def telegram_credentials(self) -> tuple[int, str]:
         try:
@@ -87,6 +92,7 @@ def load_config(path: Path) -> Config:
     allowed = {"source_group", "keywords", "domains", "timezone", "interval_seconds", "lookback_days", "batch_size", "default_window_days", "realtime_channel_limit", "milestones_hours", "spreadsheet_id", "google_credentials", "drive_folder_id", "conversation_mode", "default_client", "allowed_channels", "channel_plans", "data_namespace", "test_mode"}
     allowed.update({"campaign_matching", "campaign_provider", "campaign_model", "campaign_daily_limit", "campaign_batch_size", "campaign_total_limit"})
     allowed.update({"channel_folder", "channel_folder_watch"})
+    allowed.update({"forwarded_intake", "source_since", "source_title"})
     unknown = set(data) - allowed
     if unknown:
         raise ValueError("Неизвестные настройки: " + ", ".join(sorted(unknown)))
@@ -128,6 +134,17 @@ def load_config(path: Path) -> Config:
         raise ValueError("channel_folder: название папки, до 100 символов")
     if type(folder["channel_folder_watch"]) is not bool:
         raise ValueError("channel_folder_watch: ожидается true или false")
+    intake = {"forwarded_intake": data.get("forwarded_intake", False), "source_since": data.get("source_since", ""), "source_title": data.get("source_title", "")}
+    if type(intake["forwarded_intake"]) is not bool or not isinstance(intake["source_title"], str):
+        raise ValueError("forwarded_intake: true/false; source_title: строка")
+    if not isinstance(intake["source_since"], str):
+        raise ValueError("source_since: полная дата с часовым поясом")
+    if intake["source_since"]:
+        from datetime import datetime, timezone as utc_zone
+        since = datetime.fromisoformat(intake["source_since"])
+        if since.tzinfo is None:
+            raise ValueError("source_since: часовой пояс обязателен")
+        intake["source_since"] = since.astimezone(utc_zone.utc).isoformat()
     if type(campaign["campaign_matching"]) is not bool:
         raise ValueError("campaign_matching: ожидается true или false")
     if campaign["campaign_provider"] not in {"gemini", "openai"}:
@@ -141,4 +158,4 @@ def load_config(path: Path) -> Config:
         raise ValueError("campaign_total_limit: 0 (без общего лимита) или положительное целое до 1000000")
     return Config(root=path.parent, source_group=source, keywords=data.get("keywords", []), domains=data.get("domains", []), timezone=timezone, milestones_hours=milestones, realtime_channel_limit=realtime_limit,
                   spreadsheet_id=str(data.get("spreadsheet_id", "")), google_credentials=(path.parent / credentials).resolve() if credentials else None,
-                  drive_folder_id=data.get("drive_folder_id") or None, **numbers, **scope, **campaign, **folder)
+                  drive_folder_id=data.get("drive_folder_id") or None, **numbers, **scope, **campaign, **folder, **intake)

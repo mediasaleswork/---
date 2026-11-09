@@ -15,7 +15,7 @@ def offline_match(messages, placement):
     media = set(json.loads(placement.get("media_keys") or "[]"))
     if media.intersection(content.media):
         return MatchResult(True, "offline:тот же согласованный Telegram-материал")
-    fields = _fields(placement["source_text"])
+    fields = {} if placement.get("ad_type") == "рекламный материал" else _fields(placement["source_text"])
     explicit = fields.get("искать") or fields.get("ключевые слова")
     if explicit:
         cues = [p.strip() for p in re.split(r"[;\n]", explicit) if p.strip()]

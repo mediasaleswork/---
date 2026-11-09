@@ -95,6 +95,7 @@ class Store(AbstractContextManager):
                            "media_keys": "TEXT NOT NULL DEFAULT '[]'", "draft_id": "INTEGER", "contract_key": "TEXT NOT NULL DEFAULT ''"},
             "posts": {"last_checked_at": "TEXT", "unavailable_since": "TEXT"},
             "contract_plans": {"baseline_until": "TEXT"},
+            "campaign_checks": {"priority": "INTEGER NOT NULL DEFAULT 0"},
         }.items():
             existing = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
             for name, declaration in additions.items():

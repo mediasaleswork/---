@@ -157,6 +157,14 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.judge.compare.call_count, 1)
         self.assertEqual(len(self.store.rows("SELECT * FROM posts")), 1)
 
+    async def test_small_budget_prioritizes_likely_campaign_over_unrelated_news(self):
+        self.prepare(candidates=[message(7, "Сегодня ожидается хорошая погода"), message(8, "Реклама: Компания Alpha Lease предлагает оборудование в рассрочку")])
+        self.monitor.config = replace(self.config, campaign_daily_limit=1)
+        self.monitor.campaign_worker.config = self.monitor.config
+        await self.tick()
+        self.assertEqual([p["message_id"] for p in self.store.rows("SELECT * FROM posts")], [8])
+        self.assertEqual(self.judge.compare.call_count, 1)
+
     async def test_no_api_key_keeps_queue_and_does_not_spend_budget(self):
         self.prepare()
         self.monitor.campaign_worker = CampaignWorker(self.monitor)

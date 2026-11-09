@@ -98,6 +98,8 @@ class Monitor:
         if self.config.channel_folder_watch and not self.config.test_mode:
             self.config = replace(self.config, allowed_channels=tuple(c["username"] or f"c:{c['id']}" for c in channels))
             self._allowed_origins = None
+            from .intake import ConversationIntake
+            ConversationIntake(self.store, self.config).attach_folder_channels(datetime.now(timezone.utc))
         if self.campaign_worker:
             self.campaign_worker.config = self.config
 
@@ -194,14 +196,21 @@ class Monitor:
         if not self.config.source_group:
             raise ValueError("Заполните source_group в config.yaml; команда dialogs покажет ID доступных групп")
         entity = await self.client.get_entity(self.config.source_group)
+        if isinstance(entity, types.Chat) and getattr(entity, "migrated_to", None):
+            entity = await self.client.get_entity(types.PeerChannel(entity.migrated_to.channel_id))
         if not (isinstance(entity, types.Chat) or isinstance(entity, types.Channel) and entity.megagroup):
             raise ValueError("source_group должен указывать на рабочую группу, а не на пользователя или канал")
         self.source_peer_id = utils.get_peer_id(entity)
+        if self.config.source_title and entity.title.strip().casefold() != self.config.source_title.strip().casefold():
+            raise ValueError("Название группы не соответствует выбранной рабочей группе")
+        if not self.store.state("source_verified", ""):
+            log.info("Группа подтверждена: %s; автоматический приём пересылок %s", entity.title, self.config.forwarded_intake)
+            self.store.set_state("source_verified", str(self.source_peer_id))
         key = f"source_cursor:{entity.id}"
         cursor = int(self.store.state(key))
         options = {"min_id": cursor, "reverse": True, "limit": self.config.batch_size}
         if not cursor:
-            options["offset_date"] = datetime.now(timezone.utc) - timedelta(days=self.config.lookback_days)
+            options["offset_date"] = datetime.fromisoformat(self.config.source_since) if self.config.source_since else datetime.now(timezone.utc) - timedelta(days=self.config.lookback_days)
         async for message in self.client.iter_messages(entity, **options):
             cursor_message_id = message.id
             if self.config.conversation_mode and getattr(message, "grouped_id", None):
@@ -242,7 +251,7 @@ class Monitor:
                     self.store.add_review(entity.id, message.id, name or "вложение", "Формат вложения не поддерживается; пришлите текст условий и ссылку на канал")
             forwarded = getattr(message, "fwd_from", None)
             from_id = getattr(forwarded, "from_id", None)
-            if isinstance(from_id, types.PeerChannel):
+            if isinstance(from_id, types.PeerChannel) and not self.config.forwarded_intake:
                 try:
                     if self.config.allowed_channels:
                         if self._allowed_origins is None:

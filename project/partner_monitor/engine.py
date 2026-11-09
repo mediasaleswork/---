@@ -485,7 +485,8 @@ class Monitor:
                 if not isinstance(entity, types.Channel) or not entity.broadcast:
                     self.store.execute("UPDATE partners SET status='ignored',last_error=? WHERE id=?", ("Ссылка ведёт на пользователя, бота или группу, а не на канал", partner["id"]))
                     continue
-                if partner["username"] and not getattr(entity, "username", None):
+                from .channel_folder import public_username
+                if partner["username"] and not public_username(entity):
                     raise ValueError("Нет публичного username")
                 if partner.get("channel_id") and partner["channel_id"] != entity.id:
                     self.store.execute("UPDATE partners SET status='identity_changed',last_error=? WHERE id=?", ("Username теперь принадлежит другому каналу. Нужна проверка партнёра", partner["id"]))

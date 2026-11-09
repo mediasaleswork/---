@@ -4,6 +4,12 @@ from telethon import types, utils
 from telethon.tl.functions.messages import GetDialogFiltersRequest
 
 
+def public_username(entity):
+    # Channels with multiple/collectible usernames may omit the legacy field.
+    return (getattr(entity, "username", None) or next(
+        (u.username for u in getattr(entity, "usernames", None) or [] if u.active), None))
+
+
 async def folder_channels(client, name):
     result = await client(GetDialogFiltersRequest())
     folders = [f for f in result.filters
@@ -36,5 +42,5 @@ async def folder_channels(client, name):
             if getattr(folder, "exclude_muted", False) and muted_until and muted_until > datetime.now(timezone.utc):
                 continue
             entities[entity.id] = entity
-    return [{"id": e.id, "title": e.title, "username": e.username.lower() if e.username else None,
-             "screenshot_supported": bool(e.username)} for e in sorted(entities.values(), key=lambda e: e.id)]
+    return [{"id": e.id, "title": e.title, "username": public_username(e).lower() if public_username(e) else None,
+             "screenshot_supported": bool(public_username(e))} for e in sorted(entities.values(), key=lambda e: e.id)]

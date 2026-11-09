@@ -38,6 +38,13 @@ class FolderClient:
 
 
 class FolderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_additional_username_supports_public_screenshot(self):
+        entity = channel()
+        entity.username = None
+        entity.usernames = [types.Username("OldInactive", active=False), types.Username("ActiveAlias", active=True)]
+        client = FolderClient([folder([types.InputPeerChannel(200, 1)])], {200: entity})
+        self.assertEqual((await folder_channels(client, "каналы"))[0]["username"], "activealias")
+
     async def test_explicit_folder_deduplicates_excludes_groups_and_never_joins(self):
         one, two = types.InputPeerChannel(200, 1), types.InputPeerChannel(201, 2)
         group = channel()

@@ -121,5 +121,16 @@ class SalesTests(unittest.TestCase):
             self.assertEqual(call.call_count,1)
         self.assertGreater(self.store.state('provider_retry_after'),NOW.isoformat())
 
+    def test_workbook_identity_read_precedes_writes_and_refuses_wrong_headers(self):
+        class Fake(Sheets):
+            def __init__(self): self.calls=[]
+            def api(self,method,path='',**kwargs):
+                self.calls.append(method)
+                return {'sheets':[{'properties':{'title':n}} for n in ['Лиды','Скрипты','Источники','Работа агента']]}
+            def read(self,name,bounds): return [['Wrong workbook']]
+        sheet=Fake()
+        with self.assertRaises(ValueError): sheet.verify()
+        self.assertEqual(sheet.calls,['GET'])
+
 
 if __name__=='__main__': unittest.main()

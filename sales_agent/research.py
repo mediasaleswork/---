@@ -126,6 +126,7 @@ def validate(candidate, sources, now):
 def enrich_contact(lead, source):
     """Follow a cited business article, never a model-invented URL or private source."""
     name = re.sub(r'[^a-z0-9]', '', lead['company'].casefold())
+    lead['contact']='Найти официальный сайт «'+lead['company']+'» → контакты отдела маркетинга; контакт ещё не проверен'
     if len(name) < 4:
         return lead
     urls = [source['url'], *json.loads(source.get('links') or '[]')]
@@ -138,7 +139,9 @@ def enrich_contact(lead, source):
             for anchor in page.select('a[href]'):
                 target=anchor.get('href','')
                 domain=urlsplit(target).hostname or ''
-                if target.startswith('https://') and name in domain.replace('.','').replace('-',''):
+                words={re.sub(r'[^a-z0-9]','',w) for w in lead['company'].casefold().split() if len(w)>=4}
+                labels={p.replace('-','') for p in domain.split('.')}
+                if target.startswith('https://') and (name in labels or words.intersection(labels) or name==domain.replace('.','').replace('-','')):
                     lead['contact']=target+' — сайт по ссылке в публикации; уточнить контакт маркетинга'
                     return lead
         except Exception:

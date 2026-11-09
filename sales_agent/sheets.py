@@ -45,7 +45,7 @@ class Sheets:
             params={"valueRenderOption":"FORMATTED_VALUE"}).get("values", [])
 
     def verify(self):
-        meta = self.api(params={"fields":"spreadsheetId,spreadsheetUrl,properties(title),sheets(properties,tables)"})
+        meta = self.api('GET',params={"fields":"spreadsheetId,spreadsheetUrl,properties(title),sheets(properties,tables)"})
         names = {s["properties"]["title"] for s in meta["sheets"]}
         if not {"Лиды", "Скрипты", "Источники", "Работа агента"} <= names:
             raise ValueError("Wrong workbook: required Mediasales sheets missing")

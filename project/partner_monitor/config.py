@@ -31,9 +31,11 @@ class Config:
     data_namespace: str = ""
     test_mode: bool = False
     campaign_matching: bool = False
-    campaign_model: str = "gpt-5.4-mini-2026-03-17"
+    campaign_provider: str = "gemini"
+    campaign_model: str = "gemini-3.8-flash"
     campaign_daily_limit: int = 50
     campaign_batch_size: int = 3
+    campaign_total_limit: int = 0
 
     @property
     def runtime_dir(self) -> Path:
@@ -78,7 +80,7 @@ def load_config(path: Path) -> Config:
     if not isinstance(data, dict):
         raise ValueError("Конфигурация должна быть YAML-объектом")
     allowed = {"source_group", "keywords", "domains", "timezone", "interval_seconds", "lookback_days", "batch_size", "default_window_days", "realtime_channel_limit", "milestones_hours", "spreadsheet_id", "google_credentials", "drive_folder_id", "conversation_mode", "default_client", "allowed_channels", "channel_plans", "data_namespace", "test_mode"}
-    allowed.update({"campaign_matching", "campaign_model", "campaign_daily_limit", "campaign_batch_size"})
+    allowed.update({"campaign_matching", "campaign_provider", "campaign_model", "campaign_daily_limit", "campaign_batch_size", "campaign_total_limit"})
     unknown = set(data) - allowed
     if unknown:
         raise ValueError("Неизвестные настройки: " + ", ".join(sorted(unknown)))
@@ -110,16 +112,22 @@ def load_config(path: Path) -> Config:
     from .scope import read_scope
     scope = read_scope(data)
     campaign = {"campaign_matching": data.get("campaign_matching", False),
-                "campaign_model": data.get("campaign_model", "gpt-5.4-mini-2026-03-17"),
+                "campaign_provider": data.get("campaign_provider", "gemini"),
+                "campaign_model": data.get("campaign_model", "gemini-3.8-flash"),
                 "campaign_daily_limit": data.get("campaign_daily_limit", 50),
-                "campaign_batch_size": data.get("campaign_batch_size", 3)}
+                "campaign_batch_size": data.get("campaign_batch_size", 3),
+                "campaign_total_limit": data.get("campaign_total_limit", 0)}
     if type(campaign["campaign_matching"]) is not bool:
         raise ValueError("campaign_matching: ожидается true или false")
+    if campaign["campaign_provider"] not in {"gemini", "openai"}:
+        raise ValueError("campaign_provider: gemini или openai")
     if not isinstance(campaign["campaign_model"], str) or not campaign["campaign_model"].strip():
         raise ValueError("campaign_model: укажите имя модели")
     for key, maximum in (("campaign_daily_limit", 10000), ("campaign_batch_size", 10)):
         if type(campaign[key]) is not int or not 1 <= campaign[key] <= maximum:
             raise ValueError(f"{key}: целое число от 1 до {maximum}")
+    if type(campaign["campaign_total_limit"]) is not int or not 0 <= campaign["campaign_total_limit"] <= 1000000:
+        raise ValueError("campaign_total_limit: 0 (без общего лимита) или положительное целое до 1000000")
     return Config(root=path.parent, source_group=source, keywords=data.get("keywords", []), domains=data.get("domains", []), timezone=timezone, milestones_hours=milestones, realtime_channel_limit=realtime_limit,
                   spreadsheet_id=str(data.get("spreadsheet_id", "")), google_credentials=(path.parent / credentials).resolve() if credentials else None,
                   drive_folder_id=data.get("drive_folder_id") or None, **numbers, **scope, **campaign)

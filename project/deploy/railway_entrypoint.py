@@ -35,12 +35,13 @@ def prepare_config(root: Path, environment):
         if value not in {"true", "false"}:
             raise ValueError("CAMPAIGN_MATCHING must be true or false")
         data["campaign_matching"] = value == "true"
-    for variable, field in (("CAMPAIGN_MODEL", "campaign_model"),
+    for variable, field in (("CAMPAIGN_PROVIDER", "campaign_provider"), ("CAMPAIGN_MODEL", "campaign_model"),
                             ("CAMPAIGN_DAILY_LIMIT", "campaign_daily_limit"),
+                            ("CAMPAIGN_TOTAL_LIMIT", "campaign_total_limit"),
                             ("CAMPAIGN_BATCH_SIZE", "campaign_batch_size")):
         if environment.get(variable, "").strip():
             value = environment[variable].strip()
-            data[field] = value if field == "campaign_model" else int(value)
+            data[field] = value if field in {"campaign_model", "campaign_provider"} else int(value)
     temporary = path.with_suffix(".yaml.tmp")
     temporary.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
     temporary.replace(path)

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from PIL import Image
 
 from partner_monitor.campaigns import (CampaignAPIError, CampaignWorker, LimitedBuffer,
-    OpenAICampaignJudge, candidate_signature, enqueue, image_input, source_signature, validate_decision)
+    OpenAICampaignJudge, GeminiCampaignJudge, candidate_signature, enqueue, image_input, source_signature, validate_decision)
 from partner_monitor.config import load_config
 from partner_monitor.engine import Monitor
 from partner_monitor.storage import Store
@@ -167,6 +167,28 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
                          {"status": "pending", "attempts": 0, "reason": "missing_api_key"})
         self.assertFalse(self.store.rows("SELECT * FROM posts"))
 
+    async def test_total_test_limit_survives_new_day_budget_reset(self):
+        self.prepare(candidates=[message(7, "Материал один"), message(8, "Материал два")])
+        self.monitor.config = replace(self.config, campaign_total_limit=1)
+        self.monitor.campaign_worker.config = self.monitor.config
+        await self.tick()
+        self.store.execute("DELETE FROM state WHERE key LIKE 'campaign_api_attempts:%'")
+        await self.tick()
+        self.assertEqual(self.judge.compare.call_count, 1)
+        self.assertEqual(self.store.state("campaign_api_attempts_total"), "1")
+        self.assertEqual(self.store.rows("SELECT COUNT(*) AS n FROM campaign_checks WHERE status='pending'")[0]["n"], 1)
+
+    async def test_quota_error_pauses_whole_queue_and_never_counts_or_switches_provider(self):
+        self.prepare(candidates=[message(7, "Первый"), message(8, "Второй")])
+        self.judge.compare.side_effect = CampaignAPIError("http_429")
+        await self.tick()
+        self.assertEqual(self.judge.compare.call_count, 1)
+        self.assertEqual({r["status"] for r in self.store.rows("SELECT status FROM campaign_checks")}, {"error", "pending"})
+        self.assertFalse(self.store.rows("SELECT * FROM posts"))
+        await self.tick()
+        self.assertEqual(self.judge.compare.call_count, 1)
+        self.assertTrue(self.store.state("campaign_quota_retry_at"))
+
     async def test_changed_reference_invalidates_old_pending_job(self):
         self.prepare()
         with patch.dict(os.environ, {}, clear=True):
@@ -279,6 +301,46 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CampaignProtocolTests(unittest.TestCase):
+    def gemini_response(self, value=None, status="completed"):
+        response = Mock(status_code=200)
+        response.json.return_value = {"status": status, "steps": [{"type": "model_output", "content": [{"type": "text", "text": json.dumps(value or decision())}]}]}
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        return response
+
+    def test_gemini_revision_inline_images_schema_and_no_stored_interaction(self):
+        response = self.gemini_response()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-only-gemini-key"}), patch("partner_monitor.campaigns.requests.post", return_value=response) as http:
+            value = GeminiCampaignJudge("gemini-3.8-flash").compare([{"type": "input_text", "text": "test"}, image_input(png("blue"))])
+        self.assertEqual(value, decision())
+        args = http.call_args.kwargs
+        self.assertEqual(http.call_args.args[0], "https://generativelanguage.googleapis.com/v1beta/interactions")
+        self.assertIs(args["json"]["store"], False)
+        self.assertEqual(args["headers"]["Api-Revision"], "2026-05-20")
+        self.assertEqual(args["json"]["response_format"]["mime_type"], "application/json")
+        self.assertEqual(args["json"]["input"][1]["type"], "image")
+        self.assertNotIn("image_url", args["json"]["input"][1])
+        self.assertNotIn("tools", args["json"])
+        self.assertNotIn("test-only-gemini-key", json.dumps(args["json"]))
+        self.assertFalse(args["allow_redirects"])
+
+    def test_gemini_rejects_empty_output_incomplete_and_external_images(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            for result in ({"status": "completed", "steps": []}, {"status": "incomplete", "steps": []}):
+                response = self.gemini_response()
+                response.json.return_value = result
+                with patch("partner_monitor.campaigns.requests.post", return_value=response), self.assertRaises(CampaignAPIError):
+                    GeminiCampaignJudge("test").compare([])
+            with self.assertRaisesRegex(CampaignAPIError, "invalid_image"):
+                GeminiCampaignJudge("test").compare([{"type": "input_image", "image_url": "https://unrelated.example/picture"}])
+
+    def test_gemini_quota_and_permission_errors_are_safe_codes(self):
+        for status in (429, 403):
+            response = self.gemini_response()
+            response.status_code = status
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch("partner_monitor.campaigns.requests.post", return_value=response), self.assertRaisesRegex(CampaignAPIError, f"^http_{status}$"):
+                GeminiCampaignJudge("test").compare([])
+
     def test_http_shape_vision_json_schema_no_storage_or_tools(self):
         response = Mock()
         response.status_code = 200

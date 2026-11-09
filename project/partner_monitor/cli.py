@@ -104,7 +104,8 @@ def main(argv=None):
             print("Рабочая группа: " + ("указана" if config.source_group else "нужно заполнить source_group перед run"))
             print("Telegram: " + ("переменные заданы" if os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH") else "нужны TELEGRAM_API_ID и TELEGRAM_API_HASH перед login"))
             print("Google: " + ("настроен путь к credentials" if config.google_credentials else "не подключён; Excel доступен без Google"))
-            print("Распознавание кампаний: " + ("включено; ключ " + ("задан" if os.environ.get("OPENAI_API_KEY") else "не задан") if config.campaign_matching else "выключено"))
+            variable = "GEMINI_API_KEY" if config.campaign_provider == "gemini" else "OPENAI_API_KEY"
+            print("Распознавание кампаний: " + (config.campaign_provider + "; ключ " + ("задан" if os.environ.get(variable) else "не задан") if config.campaign_matching else "выключено"))
         elif args.command in {"login", "dialogs"}:
             asyncio.run(telegram_command(config, args.command))
         elif args.command == "run":

@@ -1,7 +1,7 @@
 """Opt-in vision/meaning comparison. Durable jobs; no Telegram writes or joins.
 
 Only the configured source material and allowed channel publication are sent to
-OpenAI. No chat history, session, sender identity or access hashes are included.
+the selected provider. No chat history, session, sender identity or access hashes are included.
 """
 from __future__ import annotations
 
@@ -75,6 +75,10 @@ def source_signature(placements, model):
         for p in sorted(placements, key=lambda p: p["id"])]])
 
 
+def model_identity(config):
+    return config.campaign_provider + ":" + config.campaign_model
+
+
 def candidate_signature(messages):
     content = combined_content(messages)
     return digest([[(m.id, m.date.isoformat()) for m in messages], content.text, content.urls, content.media])
@@ -88,7 +92,7 @@ def enqueue(store, config, partner, messages, placements):
     existing = store.rows("SELECT message_ids FROM posts WHERE partner_id=?", (partner["id"],))
     if any(set(ids).intersection(json.loads(p["message_ids"])) for p in existing):
         return
-    source = source_signature(placements, config.campaign_model)
+    source = source_signature(placements, model_identity(config))
     candidate = candidate_signature(messages)
     ident = digest([partner["id"], ids, source, candidate])
     stamp = utcnow()
@@ -130,6 +134,7 @@ class CampaignAPIError(Exception):
 
 
 class OpenAICampaignJudge:
+    key_variable = "OPENAI_API_KEY"
     def __init__(self, model):
         self.model = model
 
@@ -154,6 +159,44 @@ class OpenAICampaignJudge:
             if any(p.get("type") == "refusal" for p in parts):
                 raise CampaignAPIError("model_refusal")
             return json.loads("".join(p.get("text", "") for p in parts if p.get("type") == "output_text"))
+        except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+            raise CampaignAPIError("invalid_or_unavailable_response") from None
+
+
+class GeminiCampaignJudge:
+    key_variable = "GEMINI_API_KEY"
+
+    def __init__(self, model):
+        self.model = model
+
+    def compare(self, content):
+        key = os.environ.get(self.key_variable, "").strip()
+        if not key:
+            raise CampaignAPIError("missing_api_key")
+        parts = []
+        for part in content:
+            if part["type"] == "input_text":
+                parts.append({"type": "text", "text": part["text"]})
+            elif part["type"] == "input_image":
+                url = part["image_url"]
+                if not url.startswith("data:image/jpeg;base64,"):
+                    raise CampaignAPIError("invalid_image")
+                parts.append({"type": "image", "mime_type": "image/jpeg", "data": url.split(",", 1)[1]})
+        body = {"model": self.model, "store": False, "system_instruction": PROMPT,
+                "input": parts, "generation_config": {"max_output_tokens": 2400, "thinking_level": "minimal"},
+                "response_format": {"type": "text", "mime_type": "application/json", "schema": SCHEMA}}
+        try:
+            with requests.post("https://generativelanguage.googleapis.com/v1beta/interactions", json=body,
+                    headers={"x-goog-api-key": key, "Api-Revision": "2026-05-20"},
+                    timeout=(10, 60), allow_redirects=False) as response:
+                if response.status_code != 200:
+                    raise CampaignAPIError(f"http_{response.status_code}")
+                result = response.json()
+            if not isinstance(result, dict) or result.get("status") != "completed":
+                raise CampaignAPIError("incomplete_response")
+            texts = [part["text"] for step in result.get("steps", []) if step.get("type") == "model_output"
+                     for part in step.get("content", []) if part.get("type") == "text"]
+            return json.loads("".join(texts))
         except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
             raise CampaignAPIError("invalid_or_unavailable_response") from None
 
@@ -184,7 +227,8 @@ class CampaignWorker:
     def __init__(self, monitor, judge=None):
         self.monitor = monitor
         self.store, self.config = monitor.store, monitor.config
-        self.judge = judge or OpenAICampaignJudge(self.config.campaign_model)
+        factory = GeminiCampaignJudge if self.config.campaign_provider == "gemini" else OpenAICampaignJudge
+        self.judge = judge or factory(self.config.campaign_model)
         self.lock = asyncio.Lock()
 
     async def images(self, messages):
@@ -229,6 +273,8 @@ class CampaignWorker:
     async def _process(self):
         if self.monitor.source_peer_id is None:
             return
+        if self.store.state("campaign_quota_retry_at", "") > utcnow():
+            return
         for job in self.store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error') AND next_try_at<=? ORDER BY created_at,id LIMIT ?",
                                    (utcnow(), self.config.campaign_batch_size)):
             partner_rows = self.store.rows("SELECT * FROM partners WHERE id=?", (job["partner_id"],))
@@ -238,7 +284,7 @@ class CampaignWorker:
                           if p["id"] in ids and p["status"] not in {"needs_review", "dismissed"}]
             if (not partner or partner["status"] != "active" or not self.config.permits(PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id")))
                     or len(placements) != len(ids) or any(str(p["source_chat_id"]) != str(self.monitor.source_peer_id) for p in placements)
-                    or source_signature(placements, self.config.campaign_model) != job["source_signature"]):
+                    or source_signature(placements, model_identity(self.config)) != job["source_signature"]):
                 self.finish(job, "obsolete", "Настройки, материал или область наблюдения изменились")
                 continue
             if len(placements) > MAX_CAMPAIGNS:
@@ -247,9 +293,10 @@ class CampaignWorker:
             stamp = datetime.now(timezone.utc)
             budget_key = f"campaign_api_attempts:{stamp.date().isoformat()}"
             used = int(self.store.state(budget_key))
-            if used >= self.config.campaign_daily_limit:
+            total = int(self.store.state("campaign_api_attempts_total"))
+            if used >= self.config.campaign_daily_limit or self.config.campaign_total_limit and total >= self.config.campaign_total_limit:
                 break
-            if isinstance(self.judge, OpenAICampaignJudge) and not os.environ.get("OPENAI_API_KEY", "").strip():
+            if isinstance(self.judge, (OpenAICampaignJudge, GeminiCampaignJudge)) and not os.environ.get(self.judge.key_variable, "").strip():
                 self.store.execute("UPDATE campaign_checks SET reason='missing_api_key' WHERE id=?", (job["id"],))
                 break
             try:
@@ -279,6 +326,7 @@ class CampaignWorker:
                 content.append({"type": "input_text", "text": "PUBLICATION " + packed({"text": actual.text[:16000], "urls": actual.urls})})
                 content.extend(await self.images(messages))
                 self.store.set_state(budget_key, used + 1)
+                self.store.set_state("campaign_api_attempts_total", total + 1)
                 self.store.execute("UPDATE campaign_checks SET attempts=attempts+1 WHERE id=?", (job["id"],))
                 value = await asyncio.to_thread(self.judge.compare, content)
                 status = validate_decision(value, ids)
@@ -286,7 +334,7 @@ class CampaignWorker:
                 # both versions before committing its now possibly stale reply.
                 latest = [p for p in self.store.rows("SELECT * FROM placements WHERE partner_id=?", (partner["id"],))
                           if p["id"] in ids and p["status"] not in {"needs_review", "dismissed"}]
-                if source_signature(latest, self.config.campaign_model) != job["source_signature"]:
+                if source_signature(latest, model_identity(self.config)) != job["source_signature"]:
                     self.finish(job, "obsolete", "Материал или согласование изменились во время проверки")
                     continue
                 refreshed = await self.monitor.client.get_messages(entity, ids=json.loads(job["message_ids"]))
@@ -304,6 +352,13 @@ class CampaignWorker:
             except CampaignAPIError as exc:
                 attempts = self.store.rows("SELECT attempts FROM campaign_checks WHERE id=?", (job["id"],))[0]["attempts"]
                 code = str(exc)
+                if code == "http_429":
+                    # Shared project quota: stop the entire batch, never switch
+                    # keys/providers or activate paid billing to evade it.
+                    retry = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+                    self.store.set_state("campaign_quota_retry_at", retry)
+                    self.store.execute("UPDATE campaign_checks SET status='error',reason=?,next_try_at=? WHERE id=?", (code, retry, job["id"]))
+                    break
                 if attempts >= 3 or code in {"model_refusal", "reference_unavailable", "reference_media_changed", "invalid_image", "image_too_large"}:
                     self.finish(job, "review", "Нужна проверка: " + code)
                 else:

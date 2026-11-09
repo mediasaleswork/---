@@ -1,0 +1,121 @@
+"""Conservative extraction from published text. No model, key or generation API."""
+from __future__ import annotations
+
+import re
+
+EVENTS = [
+    ('открытие', re.compile(r'\b(?:откры(?:л[аи]?|ли|лась|лись|вает|вают|вается|тие)|откро(?:ет|ют|ется)|ochild\w*|ochil\w*|opened|opening)\b', re.I)),
+    ('запуск', re.compile(r'\b(?:запуст\w*|запуска\w*|запуск|обновил[аи]?|обновили|обновление|ishga\s+tush\w*|launch\w*|taqdim\w*)\b', re.I)),
+    ('расширение', re.compile(r'расшир\w*|выход\w*\s+на\s+рынок|нов\w*\s+филиал|kengay\w*|expan\w*', re.I)),
+    ('ребрендинг', re.compile(r'ребренд\w*|rebrand\w*', re.I)),
+    ('партнёрство', re.compile(r'партн[её]рств\w*|(?:генеральн\w*|стратегическ\w*)\s+партн[её]р\w*|hamkorlik\w*', re.I)),
+    ('инвестиции', re.compile(r'привл[её]к\w*[^.!?]{0,70}(?:инвест|финанс)|инвестиров\w*|investment\w*|sarmoya\w*', re.I)),
+    ('мероприятие', re.compile(r'(?:провод\w*|организ\w*|пройд\w*|состо\w*)[^.!?]{0,70}(?:выставк\w*|фестивал\w*|конференц\w*|форум\w*)|(?:выставк\w*|конференц\w*)[^.!?]{0,70}(?:пройд\w*|состо\w*)', re.I)),
+    ('лицензирование', re.compile(r'выдал\w*[^.!?]{0,100}лицензи\w*|получил\w*[^.!?]{0,60}лицензи\w*', re.I)),
+]
+ORG = r'(?:компани[яию]|сервис|бренд|сеть|банк|оператор|ритейлер|девелопер|стартап|застройщик|маркетплейс|ресторан|кофейня|отель|завод[ае]?|холдинг|ООО|АО|MCHJ|AJ)'
+NAME = r"[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё0-9&'’ʼʻ\-]*(?:[ \t]+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё0-9&'’ʼʻ\-]*){0,3}"
+LATIN = r"[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,3}"
+PREFIX = re.compile(r'(?i:\b'+ORG+r')\s+(?:[«“\"](?P<quoted>[^»”\"\n]{2,80})[»”\"]|(?P<name>'+NAME+r'))')
+UZBEK = re.compile(r'(?P<name>'+LATIN+r")\s+(?:kompaniyasi|banki|brendi|operatori|tarmog[‘’'ʻʼ]i)\b")
+HEADING = re.compile(r'^(?P<name>'+LATIN+r')\s+(?i:запуст|запуска|откры|откро|обнов|расшир|выход|представ|стал|заключ|launch|open|yangi|ishga)')
+EXCLUDE = re.compile(r'^(?:IT Park|Центр технологий будущего|Национальн|Министерств|Правительств|Президент|Узбекистан|Ташкент|СМИ|ОАВ|OAV|Новый|Новая|Бизнес|Клиент|Реклама|Новости|Подробнее|Telegram|Instagram|Facebook|YouTube|Davlat|O‘zbekiston|Toshkent)\b', re.I)
+COMPETITOR = re.compile(r'(?:рекламн\w*|маркетингов\w*|PR)[\s-]*(?:агентств\w*)', re.I)
+TRAGEDY = re.compile(r'погиб|убийств|скончал|теракт|уголовн|похорон', re.I)
+HYPOTHESES = {
+    'открытие':'Может быть полезно познакомить местную аудиторию с новой точкой или направлением.',
+    'запуск':'Может быть актуально рассказать целевой аудитории о новом или обновлённом предложении.',
+    'расширение':'Может быть полезна коммуникационная поддержка на новой территории или для новой аудитории.',
+    'партнёрство':'Возможно, компании интересно дополнительно объяснить аудитории ценность партнёрства.',
+    'инвестиции':'Возможно, следующему этапу развития понадобится PR-поддержка.',
+    'ребрендинг':'Может быть актуально познакомить аудиторию с обновлённым брендом.',
+    'мероприятие':'Возможно, организатору нужны охват и привлечение целевой аудитории.',
+    'лицензирование':'Возможно, после получения лицензии компания готовит выход к клиентам; запуск и потребность ещё нужно уточнить.',
+}
+
+
+def brands(text, known):
+    found=[]
+    for name in known:
+        match=re.search(r'(?<!\w)'+re.escape(name)+r'(?!\w)', text, re.I)
+        if match:
+            found.append((text[match.start():match.end()],match.start(),match.end()))
+    for pattern in (PREFIX,UZBEK,HEADING):
+        for match in pattern.finditer(text):
+            group='quoted' if 'quoted' in match.groupdict() and match.group('quoted') else 'name'
+            name=match.group(group).strip()
+            start,end=match.span(group)
+            if not EXCLUDE.search(name) and 2 <= len(name) <= 80:
+                found.append((name,start,end))
+    unique={}
+    for name,start,end in found:
+        unique.setdefault(name.casefold(),(name,start,end))
+    return list(unique.values())
+
+
+def evidence(text, start, end, event):
+    """Keep the brand and event together inside one literal source excerpt."""
+    left=min(start,event.start()); right=max(end,event.end())
+    if right-left>240:
+        return None
+    # Prefer a full sentence; a bounded literal excerpt is used for long Telegram paragraphs.
+    before=max(text.rfind('. ',0,left),text.rfind('! ',0,left),text.rfind('? ',0,left))
+    begin=before+2 if before>=0 else 0
+    after=re.search(r'[.!?](?:\s|$)',text[right:])
+    finish=right+after.end()-1 if after else len(text)
+    if finish-begin>280:
+        begin=max(0,left-30)
+        if begin>0:
+            space=text.find(' ',begin,left)
+            if space>=0: begin=space+1
+        finish=min(len(text),max(right+30,begin+220),begin+280)
+        space=text.rfind(' ',right,finish)
+        if finish<len(text) and space>right: finish=space
+    quote=text[begin:finish].strip()
+    if len(quote)<50:
+        finish=min(len(text),begin+280)
+        quote=text[begin:finish].strip()
+    return quote if 50<=len(quote)<=280 and text[start:end] in quote else None
+
+
+def sector(text):
+    groups=[('Телекоммуникации',r'мобильн\w*\s+оператор|телеком|mobil\w*\s+operator'),
+        ('Финансы',r'банк|кредит|крипто|плат[её]ж|вклад|финанс|bank|to[‘’\x27]lov'),
+        ('Недвижимость',r'квартир|жил\w*\s+комплекс|девелоп|застрой|недвижим'),
+        ('Ритейл',r'магазин|ритейл|маркетплейс|retail|do[‘’\x27]kon'),
+        ('Еда и гостеприимство',r'ресторан|кофейн|отель|гостиниц|hotel|coffee'),
+        ('Образование',r'университет|образован|учебн|школ|ta[‘’\x27]lim'),
+        ('Производство',r'завод|производств|фабрик|электроник'),
+        ('Технологии',r'приложени|стартап|программ|software|IT\b')]
+    return next((name for name,pattern in groups if re.search(pattern,text,re.I)),'Нишу уточнить')
+
+
+class RuleResearcher:
+    def __init__(self, known=()):
+        self.known=tuple(known)
+
+    def classify(self,batch,now):
+        result=[]
+        for source in batch:
+            text=source['text'][:5000]
+            if TRAGEDY.search(source['title']) or COMPETITOR.search(text[:500]):
+                continue
+            events=[(kind,m) for kind,pattern in EVENTS for m in pattern.finditer(text)]
+            for company,start,end in brands(text,self.known):
+                if EXCLUDE.search(company): continue
+                choices=sorted(events,key=lambda pair:min(abs(pair[1].start()-end),abs(start-pair[1].end())))
+                for kind,event in choices:
+                    quote=evidence(text,start,end,event)
+                    if not quote: continue
+                    # A different named company between the brand and event is ambiguous.
+                    between=text[min(end,event.end()):max(start,event.start())]
+                    if any(other[0].casefold()!=company.casefold() for other in brands(between,())):
+                        continue
+                    service='Мероприятия' if kind=='мероприятие' else 'Telegram и СМИ' if kind in {'запуск','открытие'} else 'PR'
+                    result.append(dict(source_id=source['id'],company=company,evidence_quote=quote,
+                        sector=sector(quote),event_kind=kind,service=service,hypothesis=HYPOTHESES[kind]+' Предположение нужно проверить в разговоре.',
+                        priority='C' if kind in {'лицензирование','партнёрство'} else 'B',
+                        rationale='Правило: коммерческое название и сигнал «'+kind+'» найдены в одном фрагменте публикации; ручная проверка обязательна.',
+                        confidence='средняя'))
+                    break
+        return result

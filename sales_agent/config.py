@@ -12,11 +12,9 @@ class Config:
     data_dir: Path = Path("data")
     spreadsheet_id: str = ""
     credentials_file: Path = Path("data/google.json")
-    model: str = "gemini-3.1-flash-lite"
     timezone: str = "Asia/Tashkent"
-    hour: int = 9
+    scan_interval_minutes: int = 15
     lookback_days: int = 14
-    daily_requests: int = 6
     max_leads: int = 10
     batch_size: int = 15
     channels: list[str] = field(default_factory=list)
@@ -28,14 +26,16 @@ class Config:
     @classmethod
     def load(cls):
         raw = json.loads(os.environ.get("SALES_CONFIG_JSON", "{}"))
+        for legacy in ('model','daily_requests','hour'):
+            raw.pop(legacy,None)
         root = Path(os.environ.get("SALES_DATA_DIR", raw.pop("data_dir", "data"))).resolve()
         root.mkdir(parents=True, exist_ok=True)
         raw["data_dir"] = root
         raw["credentials_file"] = root / "google.json"
         cfg = cls(**raw)
         ZoneInfo(cfg.timezone)
-        if not 0 <= cfg.hour <= 23 or not 1 <= cfg.daily_requests <= 20:
-            raise ValueError("Invalid schedule or request budget")
+        if not 5 <= cfg.scan_interval_minutes <= 1440:
+            raise ValueError("Invalid monitoring interval")
         if not 1 <= cfg.lookback_days <= 30 or not 1 <= cfg.batch_size <= 20 or not 1 <= cfg.max_leads <= 20:
             raise ValueError("Invalid research limits")
         supplied = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")

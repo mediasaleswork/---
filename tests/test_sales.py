@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sales_agent.config import Config
-from sales_agent.research import validate, Deferred, Gemini
+from sales_agent.research import validate, Deferred
+from sales_agent.rules import RuleResearcher
 from sales_agent.runner import cycle, due
 from sales_agent.sheets import Sheets, LEAD_HEADERS, SCRIPT_HEADERS
 from sales_agent.sources import parse_feed, parse_telegram, relevant
@@ -75,12 +76,11 @@ class SalesTests(unittest.TestCase):
         self.assertEqual([first['new_leads'],second['new_leads']],[1,0])
         self.assertEqual(len(self.store.leads()),1)
 
-    def test_schedule_is_weekdays_nine_tashkent_and_restart_safe(self):
-        self.assertFalse(due(self.store,self.cfg,NOW.replace(hour=3)))
+    def test_monitoring_interval_survives_restart(self):
         self.assertTrue(due(self.store,self.cfg,NOW))
-        self.store.set_state('last_schedule_day','2026-11-09')
+        self.store.set_state('last_researched',NOW.isoformat())
         self.assertFalse(due(self.store,self.cfg,NOW))
-        self.assertFalse(due(self.store,self.cfg,NOW-timedelta(days=1)))
+        self.assertTrue(due(self.store,self.cfg,NOW+timedelta(minutes=15)))
 
     def test_rss_uses_real_dates_and_html_text(self):
         rss='<rss><channel><item><title>TestBrand открыла магазин</title><link>https://news.example/1</link><pubDate>Mon, 09 Nov 2026 05:00:00 GMT</pubDate><description>&lt;p&gt;Новый магазин&lt;/p&gt;</description></item><item><title>Без даты</title><link>https://news.example/2</link></item></channel></rss>'
@@ -113,13 +113,42 @@ class SalesTests(unittest.TestCase):
         self.assertFalse(any('Лиды' in r or 'Скрипты' in r for r in ranges))
         self.assertEqual(sheets.writes[0]['valueInputOption'],'RAW')
 
-    def test_429_defers_without_printing_response_or_rotating_key(self):
-        class Response:
-            status_code=429
-        with patch.dict('os.environ',{'GEMINI_API_KEY':'secret-test'}),patch('sales_agent.research.requests.post',return_value=Response()) as call:
-            with self.assertRaises(Deferred): Gemini(self.cfg,self.store).classify([self.source],NOW)
-            self.assertEqual(call.call_count,1)
-        self.assertGreater(self.store.state('provider_retry_after'),NOW.isoformat())
+    def test_real_default_pipeline_works_without_any_model_or_network_post(self):
+        with patch.dict('os.environ',{},clear=True),patch('requests.post',side_effect=AssertionError('No model calls allowed')):
+            result=cycle(self.cfg,self.store,now=NOW,collect_sources=False)
+        self.assertEqual(result['status'],'ok')
+        self.assertEqual(result['new_leads'],1)
+        self.assertEqual(self.store.leads()[0]['company'],'TestBrand')
+
+    def test_migration_rechecks_old_sources_once_without_duplicate_crm(self):
+        self.store.processed([self.source['id']])
+        with patch('requests.post',side_effect=AssertionError('No model calls allowed')):
+            result=cycle(self.cfg,self.store,now=NOW,collect_sources=False)
+            repeat=cycle(self.cfg,self.store,now=NOW,collect_sources=False)
+        self.assertEqual(result['new_leads'],1)
+        self.assertEqual(repeat['new_leads'],0)
+        self.assertEqual(self.store.state('research_engine'),'rules-1')
+
+    def test_unknown_brand_and_uzbek_brand_use_literal_evidence(self):
+        for body,name in [
+            ('Asterium запускает новый продукт для предпринимателей Узбекистана с удобными финансовыми инструментами.','Asterium'),
+            ('Orzu kompaniyasi yangi do‘konini ishga tushirdi, unda Toshkent aholisi uchun keng mahsulot tanlovi mavjud.','Orzu')]:
+            row=dict(self.source,text=body,title=body)
+            found=RuleResearcher().classify([row],NOW)
+            self.assertTrue(found,body)
+            lead=validate(found[0],{row['id']:row},NOW)
+            self.assertIsNotNone(lead,found)
+            self.assertEqual(lead['company'],name)
+            self.assertIn(lead['evidence_quote'],body)
+
+    def test_politics_competitors_and_distant_brand_footer_are_not_leads(self):
+        bodies=[
+            'Президент Узбекистана посетил завод NURA Electric. Обсуждены различные вопросы экономики страны.',
+            'Рекламное агентство TEAMS запускает новый сервис продвижения для предпринимателей Узбекистана.',
+            'Открылся новый магазин в городе. '+('Нейтральная городская новость. '*20)+' Компания TestBrand сообщает свой телефон.']
+        for body in bodies:
+            row=dict(self.source,text=body,title=body[:100])
+            self.assertFalse(RuleResearcher().classify([row],NOW),body)
 
     def test_workbook_identity_read_precedes_writes_and_refuses_wrong_headers(self):
         class Fake(Sheets):

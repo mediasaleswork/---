@@ -8,7 +8,8 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
-from .sources import clean
+from .sources import clean, fetch
+from bs4 import BeautifulSoup
 
 SERVICES = {"PR", "Telegram и СМИ", "Digital", "SMM и контент", "Мероприятия", "Комплексное продвижение"}
 KINDS = {"запуск", "открытие", "расширение", "мероприятие", "партнёрство", "инвестиции", "ребрендинг"}
@@ -105,6 +106,9 @@ def validate(candidate, sources, now):
         return None
     # Model-written fields are hypotheses/reasoning only, never source facts or contacts.
     lead = {k: candidate[k].strip()[:1200] for k in required}
+    lead['hypothesis'] = 'Гипотеза: ' + lead['hypothesis'].removeprefix('Гипотеза: ')
+    if re.search(r'лицензи',quote,re.I) and not re.search(r'откр|запуск|запуст',quote,re.I):
+        lead['priority']='C'
     lead.update(company=company, evidence_quote=quote, source_url=source["url"],
         published=source["published"], checked=now.isoformat(),
         contact="Найти официальный сайт «" + company + "» → контакты отдела маркетинга; контакт ещё не проверен")
@@ -116,6 +120,29 @@ def validate(candidate, sources, now):
             lead["contact"] = url + " — ссылка из источника; проверить раздел контактов и получателя"
             break
     lead["scripts"] = scripts(lead)
+    return lead
+
+
+def enrich_contact(lead, source):
+    """Follow a cited business article, never a model-invented URL or private source."""
+    name = re.sub(r'[^a-z0-9]', '', lead['company'].casefold())
+    if len(name) < 4:
+        return lead
+    urls = [source['url'], *json.loads(source.get('links') or '[]')]
+    for url in urls[:4]:
+        host=(urlsplit(url).hostname or '').removeprefix('www.')
+        if host not in {'spot.uz','gazeta.uz','uzdaily.uz','kun.uz'}:
+            continue
+        try:
+            page=BeautifulSoup(fetch(url),'html.parser')
+            for anchor in page.select('a[href]'):
+                target=anchor.get('href','')
+                domain=urlsplit(target).hostname or ''
+                if target.startswith('https://') and name in domain.replace('.','').replace('-',''):
+                    lead['contact']=target+' — сайт по ссылке в публикации; уточнить контакт маркетинга'
+                    return lead
+        except Exception:
+            pass  # Contact absence never changes the independently sourced event fact.
     return lead
 
 

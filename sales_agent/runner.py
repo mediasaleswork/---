@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .research import Gemini, Deferred, validate
+from .research import Gemini, Deferred, validate, enrich_contact
 from .sheets import Sheets
 from .sources import collect, relevant
 from .store import Store, stamp
@@ -45,8 +45,10 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
                 if lead:
                     if new_count >= cfg.max_leads:
                         overflow.add(candidate["source_id"])
-                    elif store.add_lead(lead):
-                        new_count += 1
+                    else:
+                        lead=enrich_contact(lead,sources[candidate['source_id']])
+                        if store.add_lead(lead):
+                            new_count += 1
             store.processed([r["id"] for r in batch if r["id"] not in overflow])
             if new_count >= cfg.max_leads:
                 break

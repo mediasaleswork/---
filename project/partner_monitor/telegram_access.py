@@ -42,3 +42,12 @@ class TelegramAccess:
             except StopAsyncIteration:
                 return
             yield message
+
+    async def iter_dialogs(self, *args, **kwargs):
+        iterator = self.raw.iter_dialogs(*args, **kwargs).__aiter__()
+        while True:
+            try:
+                dialog = await self.request(lambda: anext(iterator))
+            except StopAsyncIteration:
+                return
+            yield dialog

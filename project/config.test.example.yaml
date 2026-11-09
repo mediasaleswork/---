@@ -26,7 +26,10 @@ drive_folder_id: ""
 # Enable after verifying the Google project is Free tier, with no billing linked.
 campaign_matching: false
 campaign_provider: gemini
-campaign_model: gemini-3.8-flash
+campaign_model: gemini-3.1-flash-lite
 campaign_daily_limit: 8
 campaign_total_limit: 8
 campaign_batch_size: 2
+# Folder metadata only in test mode; test whitelist remains unchanged.
+channel_folder: ""
+channel_folder_watch: false

@@ -35,6 +35,13 @@ def prepare_config(root: Path, environment):
         if value not in {"true", "false"}:
             raise ValueError("CAMPAIGN_MATCHING must be true or false")
         data["campaign_matching"] = value == "true"
+    if environment.get("CHANNEL_FOLDER", "").strip():
+        data["channel_folder"] = environment["CHANNEL_FOLDER"].strip()
+    if environment.get("CHANNEL_FOLDER_WATCH", "").strip():
+        value = environment["CHANNEL_FOLDER_WATCH"].strip().lower()
+        if value not in {"true", "false"}:
+            raise ValueError("CHANNEL_FOLDER_WATCH must be true or false")
+        data["channel_folder_watch"] = value == "true"
     for variable, field in (("CAMPAIGN_PROVIDER", "campaign_provider"), ("CAMPAIGN_MODEL", "campaign_model"),
                             ("CAMPAIGN_DAILY_LIMIT", "campaign_daily_limit"),
                             ("CAMPAIGN_TOTAL_LIMIT", "campaign_total_limit"),

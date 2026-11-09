@@ -32,10 +32,12 @@ class Config:
     test_mode: bool = False
     campaign_matching: bool = False
     campaign_provider: str = "gemini"
-    campaign_model: str = "gemini-3.8-flash"
+    campaign_model: str = "gemini-3.1-flash-lite"
     campaign_daily_limit: int = 50
     campaign_batch_size: int = 3
     campaign_total_limit: int = 0
+    channel_folder: str = ""
+    channel_folder_watch: bool = False
 
     @property
     def runtime_dir(self) -> Path:
@@ -51,16 +53,19 @@ class Config:
 
     def permits(self, ref) -> bool:
         if not self.allowed_channels:
-            return not self.test_mode
+            return not self.test_mode and not self.channel_folder_watch
         key = ref.username.lower() if ref.username else f"c:{ref.private_channel_id}"
         return key in self.allowed_channels
 
     def validate_run(self):
         if self.test_mode and (not self.allowed_channels or not self.data_namespace):
             raise ValueError("Тест: заполните allowed_channels и отдельный data_namespace")
-        if self.conversation_mode and not self.allowed_channels:
+        folder_scope = self.channel_folder_watch and self.channel_folder and not self.test_mode
+        if self.channel_folder_watch and not self.channel_folder:
+            raise ValueError("channel_folder_watch: задайте channel_folder")
+        if self.conversation_mode and not self.allowed_channels and not folder_scope:
             raise ValueError("conversation_mode: задайте явный список allowed_channels")
-        if self.campaign_matching and (not self.conversation_mode or not self.allowed_channels):
+        if self.campaign_matching and (not self.conversation_mode or not (self.allowed_channels or folder_scope)):
             raise ValueError("campaign_matching: нужны conversation_mode и allowed_channels")
 
     def telegram_credentials(self) -> tuple[int, str]:
@@ -81,6 +86,7 @@ def load_config(path: Path) -> Config:
         raise ValueError("Конфигурация должна быть YAML-объектом")
     allowed = {"source_group", "keywords", "domains", "timezone", "interval_seconds", "lookback_days", "batch_size", "default_window_days", "realtime_channel_limit", "milestones_hours", "spreadsheet_id", "google_credentials", "drive_folder_id", "conversation_mode", "default_client", "allowed_channels", "channel_plans", "data_namespace", "test_mode"}
     allowed.update({"campaign_matching", "campaign_provider", "campaign_model", "campaign_daily_limit", "campaign_batch_size", "campaign_total_limit"})
+    allowed.update({"channel_folder", "channel_folder_watch"})
     unknown = set(data) - allowed
     if unknown:
         raise ValueError("Неизвестные настройки: " + ", ".join(sorted(unknown)))
@@ -113,10 +119,15 @@ def load_config(path: Path) -> Config:
     scope = read_scope(data)
     campaign = {"campaign_matching": data.get("campaign_matching", False),
                 "campaign_provider": data.get("campaign_provider", "gemini"),
-                "campaign_model": data.get("campaign_model", "gemini-3.8-flash"),
+                "campaign_model": data.get("campaign_model", "gemini-3.1-flash-lite"),
                 "campaign_daily_limit": data.get("campaign_daily_limit", 50),
                 "campaign_batch_size": data.get("campaign_batch_size", 3),
                 "campaign_total_limit": data.get("campaign_total_limit", 0)}
+    folder = {"channel_folder": data.get("channel_folder", ""), "channel_folder_watch": data.get("channel_folder_watch", False)}
+    if not isinstance(folder["channel_folder"], str) or len(folder["channel_folder"]) > 100:
+        raise ValueError("channel_folder: название папки, до 100 символов")
+    if type(folder["channel_folder_watch"]) is not bool:
+        raise ValueError("channel_folder_watch: ожидается true или false")
     if type(campaign["campaign_matching"]) is not bool:
         raise ValueError("campaign_matching: ожидается true или false")
     if campaign["campaign_provider"] not in {"gemini", "openai"}:
@@ -130,4 +141,4 @@ def load_config(path: Path) -> Config:
         raise ValueError("campaign_total_limit: 0 (без общего лимита) или положительное целое до 1000000")
     return Config(root=path.parent, source_group=source, keywords=data.get("keywords", []), domains=data.get("domains", []), timezone=timezone, milestones_hours=milestones, realtime_channel_limit=realtime_limit,
                   spreadsheet_id=str(data.get("spreadsheet_id", "")), google_credentials=(path.parent / credentials).resolve() if credentials else None,
-                  drive_folder_id=data.get("drive_folder_id") or None, **numbers, **scope, **campaign)
+                  drive_folder_id=data.get("drive_folder_id") or None, **numbers, **scope, **campaign, **folder)

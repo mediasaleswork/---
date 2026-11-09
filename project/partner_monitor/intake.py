@@ -167,6 +167,10 @@ class ConversationIntake:
             self._log(chat, message, content, draft, targets, "needs_review" if issues else "approved", reason)
             return
         creative = bool(content.media or title or len(text) >= 100)
+        if creative and not targets and self.config.channel_folder_watch and not self.config.test_mode:
+            # A creative without explicit platforms is searched throughout the
+            # selected folder after approval, never in unrelated subscriptions.
+            targets = [name for name in self.config.allowed_channels if not name.startswith("c:")]
         correction = bool(re.search(r"имидж|изображени|исправ|обнов|согласован", normalized))
         if not draft and content.media and correction:
             possible = [d for d in candidates if d["client_name"] == client]

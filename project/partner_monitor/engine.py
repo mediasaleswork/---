@@ -60,16 +60,62 @@ class Monitor:
         self._allowed_origins = None
         self.campaign_wake = asyncio.Event()
         self.campaign_worker = None
+        self._folder_checked = 0.0
         if config.campaign_matching:
             from .campaigns import CampaignWorker
             self.campaign_worker = CampaignWorker(self)
 
-    def queue_campaign(self, partner, messages, placements):
+    async def refresh_channel_folder(self):
+        if not self.config.channel_folder or asyncio.get_running_loop().time() < self._folder_checked:
+            return
+        from dataclasses import replace
+        from .channel_folder import folder_channels
+        self._folder_checked = asyncio.get_running_loop().time() + 600
+        try:
+            channels = await folder_channels(self.client, self.config.channel_folder)
+        except (ValueError, errors.RPCError) as exc:
+            if isinstance(exc, errors.FloodWaitError):
+                raise
+            log.warning("Папка каналов не прочитана (%s)", type(exc).__name__)
+            # Never expand to the whole account on a missing/failed folder.
+            if self.config.channel_folder_watch and not self.config.test_mode:
+                self.config = replace(self.config, allowed_channels=())
+                if self.campaign_worker:
+                    self.campaign_worker.config = self.config
+            return
+        payload = json.dumps(channels, ensure_ascii=False)
+        if self.store.state("channel_folder_inventory", "") != payload:
+            self.store.set_state("channel_folder_inventory", payload)
+            log.info("Папка %s: %s каналов; публичных %s; тестовый режим %s",
+                     self.config.channel_folder, len(channels), sum(bool(c["username"]) for c in channels), self.config.test_mode)
+            for c in channels:
+                log.info("Канал из папки: %s; %s", c["title"], "@" + c["username"] if c["username"] else "закрытый, снимок недоступен")
+        self.config.runtime_dir.mkdir(parents=True, exist_ok=True)
+        target = self.config.runtime_dir / "channel-folder.json"
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(target)
+        if self.config.channel_folder_watch and not self.config.test_mode:
+            self.config = replace(self.config, allowed_channels=tuple(c["username"] for c in channels if c["username"]))
+            self._allowed_origins = None
+        if self.campaign_worker:
+            self.campaign_worker.config = self.config
+
+    async def queue_campaign(self, partner, messages, placements):
         from .campaigns import enqueue
+        from .fallback import offline_match
         published = messages[0].date
         eligible = [p for p in placements if p["status"] not in {"needs_review", "dismissed", "not_found"}
                     and not json.loads(p["direct_ids"])
                     and datetime.fromisoformat(p["starts_at"]) <= published < datetime.fromisoformat(p["ends_at"])]
+        offline = [(p, offline_match(messages, p)) for p in eligible]
+        offline = [(p, match) for p, match in offline if match.matched]
+        # Two eligible campaigns sharing media/text must not both be counted.
+        if len(offline) == 1:
+            placement, match = offline[0]
+            await self.record_post(partner, messages[0].peer_id, messages, match.reason, [placement])
+            log.info("Реклама распознана без ИИ: сообщения %s", [m.id for m in messages])
+            return
         enqueue(self.store, self.config, partner, messages, eligible)
         if eligible:
             self.campaign_wake.set()
@@ -141,7 +187,7 @@ class Monitor:
                         if any(m.id == mid for m in messages):
                             self.store.execute("UPDATE requested_posts SET done=1 WHERE partner_id=? AND message_id=?", (partner["id"], mid))
             if self.config.campaign_matching:
-                self.queue_campaign(partner, messages, placements)
+                await self.queue_campaign(partner, messages, placements)
 
     async def ingest_group(self):
         self.config.validate_run()
@@ -314,7 +360,7 @@ class Monitor:
                     published = members[0].date
                     text = search_text(members)
                     if self.config.campaign_matching:
-                        self.queue_campaign(partner, members, placements)
+                        await self.queue_campaign(partner, members, placements)
                     for placement in ([] if self.config.campaign_matching else searches):
                         if not datetime.fromisoformat(placement["starts_at"]) <= published < datetime.fromisoformat(placement["ends_at"]):
                             continue
@@ -406,6 +452,7 @@ class Monitor:
     async def tick(self):
         self._attempted.clear()
         self.config.validate_run()
+        await self.refresh_channel_folder()
         self.store.configure_plans(self.config)
         await self.ingest_group()
         for partner in self.store.rows("SELECT * FROM partners WHERE status NOT IN ('ignored','needs_review')"):

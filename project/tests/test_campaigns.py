@@ -243,14 +243,42 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.rows("SELECT * FROM posts"))
         self.assertEqual({j["status"] for j in self.store.rows("SELECT status FROM campaign_checks")}, {"obsolete", "pending"})
 
-    async def test_three_failed_calls_require_review_without_false_count(self):
+    async def test_transient_outage_keeps_retrying_after_three_failures(self):
         self.prepare()
         self.judge.compare.side_effect = CampaignAPIError("http_503")
         for _ in range(3):
             self.store.execute("UPDATE campaign_checks SET next_try_at=?", ((NOW - timedelta(hours=1)).isoformat(),))
             await self.tick()
-        self.assertEqual(self.store.rows("SELECT status,attempts FROM campaign_checks")[0], {"status": "review", "attempts": 3})
+        self.assertEqual(self.store.rows("SELECT status,attempts FROM campaign_checks")[0], {"status": "error", "attempts": 3})
         self.assertFalse(self.store.rows("SELECT * FROM posts"))
+
+    async def test_quota_exhausted_exact_creative_is_captured_without_ai(self):
+        self.prepare(source_image=True, candidates=[image_message(7, "Согласованный материал", photo=900, peer=200)])
+        self.store.set_state("campaign_quota_retry_at", (NOW + timedelta(days=3650)).isoformat())
+        await self.tick()
+        self.judge.compare.assert_not_called()
+        self.assertEqual(len(self.store.rows("SELECT * FROM posts")), 1)
+        self.assertEqual(len(self.capture.calls), 1)
+
+    async def test_quota_recovery_processes_waiting_changed_material(self):
+        self.prepare()
+        self.store.set_state("campaign_quota_retry_at", (NOW + timedelta(days=3650)).isoformat())
+        await self.tick()
+        self.judge.compare.assert_not_called()
+        self.assertEqual(self.store.rows("SELECT status FROM campaign_checks")[0]["status"], "pending")
+        self.store.set_state("campaign_quota_retry_at", "")
+        await self.tick()
+        self.assertEqual(len(self.store.rows("SELECT * FROM posts")), 1)
+
+    async def test_service_messages_stay_local_and_no_group_screenshots(self):
+        self.prepare(candidates=[])
+        self.client.histories[200] = []
+        self.client.histories[100] += [message(2, "Превью", peer=100), message(3, "ок", peer=100),
+                                      message(4, "Когда будет готово?", peer=100)]
+        await self.tick()
+        self.judge.compare.assert_not_called()
+        self.assertFalse(self.capture.calls)
+        self.assertEqual(self.store.rows("SELECT COUNT(*) AS n FROM source_messages")[0]["n"], 4)
 
     async def test_live_other_channel_is_ignored_before_queue_or_ai(self):
         self.prepare()
@@ -301,32 +329,32 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CampaignProtocolTests(unittest.TestCase):
-    def gemini_response(self, value=None, status="completed"):
+    def gemini_response(self, value=None, status="STOP"):
         response = Mock(status_code=200)
-        response.json.return_value = {"status": status, "steps": [{"type": "model_output", "content": [{"type": "text", "text": json.dumps(value or decision())}]}]}
+        response.json.return_value = {"candidates": [{"finishReason": status, "content": {"parts": [{"text": json.dumps(value or decision())}]}}]}
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
         return response
 
-    def test_gemini_revision_inline_images_schema_and_no_stored_interaction(self):
+    def test_gemini_generate_content_inline_images_and_json_schema(self):
         response = self.gemini_response()
         with patch.dict(os.environ, {"GEMINI_API_KEY": "test-only-gemini-key"}), patch("partner_monitor.campaigns.requests.post", return_value=response) as http:
-            value = GeminiCampaignJudge("gemini-3.8-flash").compare([{"type": "input_text", "text": "test"}, image_input(png("blue"))])
+            value = GeminiCampaignJudge("gemini-3.1-flash-lite").compare([{"type": "input_text", "text": "test"}, image_input(png("blue"))])
         self.assertEqual(value, decision())
         args = http.call_args.kwargs
-        self.assertEqual(http.call_args.args[0], "https://generativelanguage.googleapis.com/v1beta/interactions")
-        self.assertIs(args["json"]["store"], False)
-        self.assertEqual(args["headers"]["Api-Revision"], "2026-05-20")
-        self.assertEqual(args["json"]["response_format"]["mime_type"], "application/json")
-        self.assertEqual(args["json"]["input"][1]["type"], "image")
-        self.assertNotIn("image_url", args["json"]["input"][1])
+        self.assertEqual(http.call_args.args[0], "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent")
+        self.assertEqual(args["json"]["generationConfig"]["thinkingConfig"]["thinkingLevel"], "MINIMAL")
+        self.assertEqual(args["json"]["generationConfig"]["maxOutputTokens"], 4000)
+        self.assertEqual(args["json"]["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(args["json"]["contents"][0]["parts"][1]["inlineData"]["mimeType"], "image/jpeg")
+        self.assertNotIn("image_url", args["json"]["contents"][0]["parts"][1])
         self.assertNotIn("tools", args["json"])
         self.assertNotIn("test-only-gemini-key", json.dumps(args["json"]))
         self.assertFalse(args["allow_redirects"])
 
     def test_gemini_rejects_empty_output_incomplete_and_external_images(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-            for result in ({"status": "completed", "steps": []}, {"status": "incomplete", "steps": []}):
+            for result in ({"candidates": []}, {"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]}):
                 response = self.gemini_response()
                 response.json.return_value = result
                 with patch("partner_monitor.campaigns.requests.post", return_value=response), self.assertRaises(CampaignAPIError):

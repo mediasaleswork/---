@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import re
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 import requests
@@ -170,6 +171,8 @@ class GeminiCampaignJudge:
     key_variable = "GEMINI_API_KEY"
 
     def __init__(self, model):
+        if not re.fullmatch(r"[a-zA-Z0-9._-]{1,100}", model):
+            raise ValueError("Некорректное имя модели Gemini")
         self.model = model
 
     def compare(self, content):
@@ -179,28 +182,34 @@ class GeminiCampaignJudge:
         parts = []
         for part in content:
             if part["type"] == "input_text":
-                parts.append({"type": "text", "text": part["text"]})
+                parts.append({"text": part["text"]})
             elif part["type"] == "input_image":
                 url = part["image_url"]
                 if not url.startswith("data:image/jpeg;base64,"):
                     raise CampaignAPIError("invalid_image")
-                parts.append({"type": "image", "mime_type": "image/jpeg", "data": url.split(",", 1)[1]})
-        body = {"model": self.model, "store": False, "system_instruction": PROMPT,
-                "input": parts, "generation_config": {"max_output_tokens": 2400, "thinking_level": "minimal"},
-                "response_format": {"type": "text", "mime_type": "application/json", "schema": SCHEMA}}
+                parts.append({"inlineData": {"mimeType": "image/jpeg", "data": url.split(",", 1)[1]}})
+        body = {"systemInstruction": {"parts": [{"text": PROMPT}]},
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"maxOutputTokens": 4000,
+                    "thinkingConfig": {"thinkingLevel": "MINIMAL"},
+                    "responseMimeType": "application/json", "responseJsonSchema": SCHEMA}}
         try:
-            with requests.post("https://generativelanguage.googleapis.com/v1beta/interactions", json=body,
-                    headers={"x-goog-api-key": key, "Api-Revision": "2026-05-20"},
-                    timeout=(10, 60), allow_redirects=False) as response:
+            with requests.post("https://generativelanguage.googleapis.com/v1beta/models/" + self.model + ":generateContent", json=body,
+                    headers={"x-goog-api-key": key}, timeout=(10, 60), allow_redirects=False) as response:
                 if response.status_code != 200:
                     raise CampaignAPIError(f"http_{response.status_code}")
                 result = response.json()
-            if not isinstance(result, dict) or result.get("status") != "completed":
-                raise CampaignAPIError("incomplete_response")
-            texts = [part["text"] for step in result.get("steps", []) if step.get("type") == "model_output"
-                     for part in step.get("content", []) if part.get("type") == "text"]
+            candidates = result.get("candidates", []) if isinstance(result, dict) else []
+            if len(candidates) != 1 or candidates[0].get("finishReason") != "STOP":
+                raise CampaignAPIError("incomplete_or_blocked_response")
+            texts = [part["text"] for part in candidates[0].get("content", {}).get("parts", [])
+                     if isinstance(part.get("text"), str) and not part.get("thought")]
             return json.loads("".join(texts))
-        except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+        except requests.Timeout:
+            raise CampaignAPIError("request_timeout") from None
+        except requests.RequestException:
+            raise CampaignAPIError("network_unavailable") from None
+        except (ValueError, TypeError, KeyError, AttributeError):
             raise CampaignAPIError("invalid_or_unavailable_response") from None
 
 
@@ -363,10 +372,11 @@ class CampaignWorker:
                     self.store.set_state("campaign_quota_retry_at", retry)
                     self.store.execute("UPDATE campaign_checks SET status='error',reason=?,next_try_at=? WHERE id=?", (code, retry, job["id"]))
                     break
-                if attempts >= 3 or code in {"model_refusal", "reference_unavailable", "reference_media_changed", "invalid_image", "image_too_large"}:
+                transient = code in {"request_timeout", "network_unavailable", "http_500", "http_502", "http_503", "http_504"}
+                if (attempts >= 3 and not transient) or code in {"model_refusal", "reference_unavailable", "reference_media_changed", "invalid_image", "image_too_large"}:
                     self.finish(job, "review", "Нужна проверка: " + code)
                 else:
-                    retry = (datetime.now(timezone.utc) + timedelta(minutes=5 * max(1, attempts))).isoformat()
+                    retry = (datetime.now(timezone.utc) + timedelta(minutes=min(60, 5 * max(1, attempts)))).isoformat()
                     self.store.execute("UPDATE campaign_checks SET status='error',reason=?,next_try_at=? WHERE id=?", (code, retry, job["id"]))
             except ValueError:
                 self.finish(job, "review", "Некорректный ответ распознавания; совпадение не засчитано")

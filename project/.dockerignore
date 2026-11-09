@@ -13,7 +13,5 @@ secrets
 **/*.sqlite*
 **/*.db
 *.xlsx
-tests
 dist
 build
-

@@ -212,7 +212,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
                   ("Замер просмотров", shown_time(item["views_checked"])),
                   ("Размещение", ("; ".join(f"{h:g}" for h in item["durations"]) + " ч") if item["durations"] else "Не указано"),
                   ("Плановое снятие", shown_time(item["until"])),
-                  ("Снимок сделан", shown_time(item["picture_at"]))]
+                  ("Карточка создана" if item.get("picture_kind") == "card" else "Снимок сделан", shown_time(item["picture_at"]))]
         if compact and not item["durations"]:
             fields = [(label, value) for label, value in fields if label not in {"Размещение", "Плановое снятие"}]
         information = "\n".join(f"{label}: {value}" for label, value in fields)

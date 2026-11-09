@@ -96,7 +96,7 @@ class Monitor:
         temporary.write_text(payload, encoding="utf-8")
         temporary.replace(target)
         if self.config.channel_folder_watch and not self.config.test_mode:
-            self.config = replace(self.config, allowed_channels=tuple(c["username"] for c in channels if c["username"]))
+            self.config = replace(self.config, allowed_channels=tuple(c["username"] or f"c:{c['id']}" for c in channels))
             self._allowed_origins = None
         if self.campaign_worker:
             self.campaign_worker.config = self.config
@@ -248,7 +248,7 @@ class Monitor:
                         if self._allowed_origins is None:
                             self._allowed_origins = {}
                             for name in self.config.allowed_channels:
-                                origin = await self.client.get_entity(name)
+                                origin = await self.client.get_entity(types.PeerChannel(int(name[2:])) if name.startswith("c:") else name)
                                 if isinstance(origin, types.Channel) and origin.broadcast:
                                     self._allowed_origins[origin.id] = origin
                         origin = self._allowed_origins.get(from_id.channel_id)
@@ -388,13 +388,23 @@ class Monitor:
 
     async def capture_snapshot(self, partner: dict, post: dict, snapshot: dict):
         self._attempted.add(snapshot["id"])
-        if not partner["username"]:
-            self.store.execute("""UPDATE snapshots SET screenshot_status='unavailable',screenshot_error=?,
-              capture_attempts=3 WHERE id=?""", ("Закрытый канал: публичный виджет Telegram недоступен; нужен отдельный снимок из авторизованного клиента", snapshot["id"]))
-            return
         self._capturing.add(snapshot["id"])
         try:
-            result = await self.capture.capture(partner["username"], json.loads(post["message_ids"]), f"post-{post['id']}-snapshot-{snapshot['id']}")
+            key = f"post-{post['id']}-snapshot-{snapshot['id']}"
+            if partner["username"]:
+                result = await self.capture.capture(partner["username"], json.loads(post["message_ids"]), key)
+            else:
+                from .capture import CaptureResult
+                from .private_card import capture_private_card
+                entity = await self.client.get_entity(types.PeerChannel(partner["private_channel_id"]))
+                ids = json.loads(post["message_ids"])
+                members = await self.client.get_messages(entity, ids=ids)
+                members = sorted([m for m in members if isinstance(m, types.Message)
+                                  and isinstance(m.peer_id, types.PeerChannel) and m.peer_id.channel_id == entity.id], key=lambda m: m.id)
+                if not isinstance(entity, types.Channel) or not entity.broadcast or entity.id != partner["channel_id"] or [m.id for m in members] != sorted(ids):
+                    result = CaptureResult(None, "unavailable", "Пост закрытого канала недоступен; прежняя карточка сохранена")
+                else:
+                    result = await capture_private_card(self.capture, self.client, partner, members, snapshot, post["url"], key, self.config.timezone)
             self.store.execute("""UPDATE snapshots SET screenshot_path=?,screenshot_status=?,screenshot_error=?,
               screenshot_at=?,capture_attempts=capture_attempts+1 WHERE id=?""",
               (result.path, result.status, result.error, utcnow() if result.path else None, snapshot["id"]))
@@ -492,6 +502,8 @@ class Monitor:
                     self.store.execute("UPDATE partners SET status='identity_changed',last_error=? WHERE id=?", ("Username теперь принадлежит другому каналу. Нужна проверка партнёра", partner["id"]))
                     continue
                 self.store.execute("UPDATE partners SET channel_id=?,private_channel_id=?,title=?,status='active',last_error=NULL WHERE id=?", (entity.id, entity.id if not partner["username"] else None, entity.title, partner["id"]))
+                partner.update(channel_id=entity.id, private_channel_id=entity.id if not partner["username"] else None,
+                               title=entity.title, status="active", last_error=None)
                 if self.on_channel:
                     self.on_channel(partner, entity)
                 await self.measure(partner, entity)

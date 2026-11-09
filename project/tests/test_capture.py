@@ -60,6 +60,30 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         with Image.open(path) as picture:
             self.assertGreater(picture.height, 1500)
 
+    async def test_private_card_renders_real_media_without_external_requests(self):
+        import io
+        from PIL import Image
+        from unittest.mock import AsyncMock
+        from partner_monitor.private_card import capture_private_card
+        from test_conversation import image_message
+        from test_engine import NOW
+        picture = io.BytesIO()
+        Image.new("RGB", (400, 420), "orange").save(picture, "PNG")
+        requests = []
+        self.capture._context.on("request", lambda request: requests.append(request.url))
+        client = AsyncMock()
+        client.download_media.side_effect = lambda message, file, thumb: file.write(picture.getvalue())
+        result = await capture_private_card(self.capture, client, {"title": "Закрытый тест"},
+            [image_message(7, '<script>fetch("https://external.invalid")</script>', peer=200)],
+            {"views": 123, "checked_at": NOW.isoformat()}, "https://t.me/c/200/7", "../safe", "Asia/Tashkent")
+        self.assertEqual(result.status, "ok", result.error)
+        self.assertIn("не снимок интерфейса", result.error)
+        self.assertEqual(Path(result.path).parent, Path(self.tmp.name))
+        self.assertFalse([r for r in requests if r.startswith(("http:", "https:"))])
+        with Image.open(result.path) as rendered:
+            self.assertEqual(rendered.width, 712)
+            self.assertGreater(rendered.height, 600)
+
     async def test_wrong_message_is_not_screenshotted(self):
         await self.route(widget(message_id=84))
         result = await self.capture.capture("telegram", [83], "wrong")

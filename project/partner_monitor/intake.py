@@ -12,6 +12,7 @@ import re
 from .briefs import _fields, parse_brief
 from .parsing import PartnerReference, _normalize
 from .storage import utcnow
+from .scope import target_key, target_reference
 
 
 def packed(value):
@@ -63,7 +64,7 @@ class ConversationIntake:
         keywords = creative_cues(text, brief, fields)
         issues = []
         for name in names:
-            ref = PartnerReference(name, source_url=f"https://t.me/{name}")
+            ref = target_reference(name)
             if not self.config.permits(ref):
                 continue
             pid = self.store.add_partner(ref, draft["source_chat_id"], draft["anchor_id"], enqueue=False)
@@ -137,7 +138,7 @@ class ConversationIntake:
         if not draft and len(text) >= 100:
             matching = [d for d in candidates if d["client_name"] == client and _normalize(d["creative_text"]) == normalized]
             draft = matching[0] if len(matching) == 1 else None
-        targets = list(dict.fromkeys(r.username for r in refs if r.username and self.config.permits(r)))
+        targets = list(dict.fromkeys(target_key(r) for r in refs if target_key(r) and self.config.permits(r)))
         for p in self.config.channel_plans:
             if p["client"] != client:
                 continue
@@ -147,7 +148,7 @@ class ConversationIntake:
                     targets.append(p["channel"])
         preview = bool(re.search(r"\b(?:превью|preview|образец|пример)\b", normalized))
         approval = bool(re.fullmatch(r"(?:ок|ok|хоп|согласовано|согласован|утверждено|можно выпускать)[.!\s🤝✅]*", normalized))
-        direct = {r.username: [r.message_id] for r in refs if r.username in targets and r.message_id} if not preview else {}
+        direct = {target_key(r): [r.message_id] for r in refs if target_key(r) in targets and r.message_id} if not preview else {}
         if approval:
             if not draft:
                 pending = [d for d in candidates if d["status"] == "preview" and d["client_name"] == client]
@@ -170,7 +171,7 @@ class ConversationIntake:
         if creative and not targets and self.config.channel_folder_watch and not self.config.test_mode:
             # A creative without explicit platforms is searched throughout the
             # selected folder after approval, never in unrelated subscriptions.
-            targets = [name for name in self.config.allowed_channels if not name.startswith("c:")]
+            targets = list(self.config.allowed_channels)
         correction = bool(re.search(r"имидж|изображени|исправ|обнов|согласован", normalized))
         if not draft and content.media and correction:
             possible = [d for d in candidates if d["client_name"] == client]

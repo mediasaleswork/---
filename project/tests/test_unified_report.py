@@ -35,6 +35,12 @@ class UnifiedReportTests(unittest.TestCase):
         view = build_view(self.partners, self.posts, self.snapshots)
         self.assertEqual([(r["client"], r["plan"], r["total"], r["remaining"]) for r in view["summary"]], [("Client A", 10, 1, 9), ("Client B", 5, 1, 4)])
 
+    def test_private_card_is_labelled_separately_from_a_telegram_screenshot(self):
+        self.snapshots[0]["screenshot_error"] = "Карточка закрытого поста из данных Telegram; не снимок интерфейса"
+        record = next(r for r in build_view(self.partners, self.posts, self.snapshots)["records"] if r["id"] == 1)
+        self.assertEqual(record["picture_kind"], "card")
+        self.assertIn("Карточка закрытого поста", record["picture_note"])
+
     def test_latest_failed_screenshot_preserves_last_successful_evidence(self):
         record = next(r for r in build_view(self.partners, self.posts, self.snapshots)["records"] if r["id"] == 1)
         self.assertEqual(record["picture_path"], str(self.old))

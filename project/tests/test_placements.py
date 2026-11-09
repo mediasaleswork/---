@@ -84,7 +84,7 @@ class PlacementTests(unittest.IsolatedAsyncioTestCase):
         await self.tick(client, capture)
         self.assertEqual(self.store.rows("SELECT status FROM posts")[0]["status"], "unavailable")
 
-    async def test_private_member_can_read_counters_but_never_gets_fake_screenshot(self):
+    async def test_private_member_keeps_counters_when_card_renderer_is_unavailable(self):
         client = FakeClient([message(1, "https://t.me/+existingInvite", peer=100)], [message(7, "Test", views=34)])
         client.invites["existingInvite"] = types.ChatInviteAlready(chat=channel(username=None))
         # Use a direct private post so no brand cue is needed.
@@ -94,7 +94,8 @@ class PlacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.rows("SELECT url FROM posts")[0]["url"], "https://t.me/c/200/7")
         snapshot = self.store.rows("SELECT * FROM snapshots")[0]
         self.assertEqual(snapshot["views"], 34)
-        self.assertEqual(snapshot["screenshot_status"], "unavailable")
+        self.assertEqual(snapshot["screenshot_status"], "failed")
+        self.assertIsNone(snapshot["screenshot_path"])
         self.assertEqual(capture.calls, [])
 
     async def test_invite_of_existing_member_reads_history_without_importing_invite(self):

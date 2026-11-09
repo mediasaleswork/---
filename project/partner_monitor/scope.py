@@ -2,7 +2,18 @@
 import re
 from datetime import datetime, timezone
 
-from .parsing import parse_partner_references
+from .parsing import PartnerReference, parse_partner_references
+
+
+def target_key(ref):
+    return ref.username or (f"c:{ref.private_channel_id}" if ref.private_channel_id else None)
+
+
+def target_reference(name):
+    if name.startswith("c:") and name[2:].isdigit():
+        cid = int(name[2:])
+        return PartnerReference(None, source_url=f"https://t.me/c/{cid}", private=True, private_channel_id=cid)
+    return PartnerReference(name, source_url=f"https://t.me/{name}")
 
 
 def channel_ref(value):

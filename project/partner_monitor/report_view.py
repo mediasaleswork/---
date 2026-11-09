@@ -82,6 +82,9 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
             picture_note = latest.get("screenshot_error") or "Скриншот ещё не получен"
         elif latest.get("id") != picture.get("id"):
             picture_note = "Показан последний успешный снимок. Более поздний снимок недоступен."
+        is_card = bool(picture and str(picture.get("screenshot_error") or "").startswith("Карточка закрытого поста"))
+        if is_card:
+            picture_note = ("Карточка закрытого поста из данных Telegram. " + picture_note).strip()
         if post.get("evidence_note"):
             picture_note = (post["evidence_note"] + " " + picture_note).strip()
         record = {"id": post["id"], "client": "; ".join(clients), "channel": partner.get("title") or partner.get("username") or "Канал не указан",
@@ -97,6 +100,7 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
             "picture_path": picture["screenshot_path"] if picture else None,
             "picture_at": local(picture.get("screenshot_at") or picture.get("checked_at"), tz) if picture else None,
             "picture_views": picture.get("views") if picture else None, "picture_note": picture_note,
+            "picture_kind": "card" if is_card else "screenshot",
             "error": post.get("last_error") or partner.get("last_error") or "",
             "placement_ids": post.get("placement_ids", []), "text": post.get("text") or ""}
         records.append(record)

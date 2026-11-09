@@ -10,11 +10,12 @@ from telethon import types
 from partner_monitor.channel_folder import folder_channels
 from partner_monitor.engine import Monitor
 from partner_monitor.parsing import PartnerReference
-from test_engine import NOW, channel, FakeCapture, FakeClient
+from test_engine import NOW, channel, FakeCapture, FakeClient, message
 import test_conversation as conversation
 from test_conversation import image_message
 from partner_monitor.intake import ConversationIntake
 from partner_monitor.message_content import message_content
+from partner_monitor.capture import CaptureResult
 
 
 def folder(peers, **flags):
@@ -109,3 +110,23 @@ class FolderScopeTests(unittest.IsolatedAsyncioTestCase):
         intake.consume(-1000000000100, m, message_content(m), [])
         self.assertEqual(self.store.rows("SELECT status FROM placements")[0]["status"], "needs_review")
         self.assertEqual(self.store.rows("SELECT username FROM partners")[0]["username"], "partner_one")
+
+    async def test_closed_folder_channel_is_monitored_without_a_public_widget(self):
+        config = replace(self.config, channel_folder="каналы", channel_folder_watch=True,
+                         allowed_channels=("c:200",), test_mode=False, campaign_matching=True)
+        intake = ConversationIntake(self.store, config)
+        for m in (image_message(1, "Название: Closed test offer\nПревью"), message(2, "ок", peer=100)):
+            intake.consume(-1000000000100, m, message_content(m), [])
+        self.client.partner.username = None
+        self.client.histories[200] = [image_message(7, "Approved image", peer=200)]
+        capture = FakeCapture()
+        monitor = Monitor(config, self.store, self.client, capture)
+        inventory = [{"id": 200, "title": "Closed", "username": None, "screenshot_supported": False}]
+        with patch("partner_monitor.channel_folder.folder_channels", new=AsyncMock(return_value=inventory)), patch("partner_monitor.engine.asyncio.sleep", new=AsyncMock()), patch("partner_monitor.private_card.capture_private_card", new=AsyncMock(return_value=CaptureResult("card.png", "ok", "Карточка закрытого поста"))) as renderer:
+            await monitor.tick()
+        self.assertEqual(monitor.config.allowed_channels, ("c:200",))
+        self.assertEqual(len(self.store.rows("SELECT * FROM posts")), 1)
+        self.assertEqual(self.store.rows("SELECT views,screenshot_status FROM snapshots")[0], {"views": 10, "screenshot_status": "ok"})
+        self.assertEqual(capture.calls, [])
+        self.assertEqual(renderer.await_count, 1)
+        self.assertEqual(renderer.call_args.args[3][0].peer_id.channel_id, 200)

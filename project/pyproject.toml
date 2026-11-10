@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-monitor"
-version = "0.7.6"
+version = "0.7.7"
 description = "Telegram partner advertisements monitoring and screenshot reports"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,6 +12,8 @@ dependencies = [
   "playwright>=1.48,<2",
   "openpyxl>=3.1,<4",
   "Pillow>=10,<13",
+  "opencv-python-headless>=4.13,<4.14",
+  "numpy>=2,<3",
   "PyYAML>=6,<7",
   "google-auth>=2.35,<3",
   "google-auth-oauthlib>=1.2,<2",

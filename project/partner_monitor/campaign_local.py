@@ -22,6 +22,16 @@ from .fallback import offline_match
 from .parsing import _normalize
 from .storage import utcnow
 
+_CYRILLIC = str.maketrans(dict(zip(
+    'абвгдеёжзийклмнопрстуфхцчшщъыьэюяўқғҳ',
+    ['a','b','v','g','d','e','yo','j','z','i','y','k','l','m','n','o','p','r','s','t','u','f','x','ts','ch','sh','shch','','i','','e','yu','ya',"o'",'q',"g'",'h'])))
+
+
+def normalized_text(text):
+    # Links/timestamps and channel footers are not the creative's offer terms.
+    text=re.sub(r'https?://[^\s<>]+|(?<!\w)@[\w]+',' ',_normalize(text))
+    return text.translate(_CYRILLIC).replace("'",'')
+
 
 def local_reason(worker, now):
     from .campaign_queue import budget
@@ -45,7 +55,34 @@ def reference_texts(placement):
 
 
 def tokens(text):
-    return re.findall(r"[\w']+", _normalize(text))
+    return re.findall(r'\w+',normalized_text(text))
+
+
+def conflicting_numbers(actual,placement):
+    expected={t for text in reference_texts(placement) for t in tokens(text) if any(c.isdigit() for c in t)}
+    present={t for t in tokens(actual) if any(c.isdigit() for c in t)}
+    return bool(expected and present and not expected.issubset(present))
+
+
+def equivalent_matches(matches,placements,visuals=None):
+    """Alternative references to the very same video count as one campaign."""
+    if len(matches)<2:return matches
+    selected=[p for p in placements if p['id'] in matches]
+    identities=[video_ids(p['source_text']) for p in selected]
+    common_video=bool(identities and set.intersection(*identities))
+    visual_same=bool(visuals and all(p['id'] in visuals for p in selected)
+                     and set.intersection(*(visuals[p['id']] for p in selected)))
+    nonempty=[s for s in identities if s]
+    conflicting_videos=bool(nonempty and not set.intersection(*nonempty))
+    same_client=len({_normalize(p.get('client_name','')) for p in selected})==1
+    terms=[{t for text in reference_texts(p) for t in tokens(text) if any(c.isdigit() for c in t)} for p in selected]
+    terms=[t for t in terms if t]
+    conflicting_offers=any(t!=terms[0] for t in terms[1:])
+    if same_client and not conflicting_offers and (common_video or visual_same and not conflicting_videos):
+        specific=[p['id'] for p in selected if video_ids(p['source_text'])]
+        ident=min(specific or matches)
+        return {ident:matches[ident]+'; альтернативные образцы одного рекламного материала'}
+    return matches
 
 
 def text_copy(actual, placement):
@@ -109,7 +146,12 @@ async def check_candidate(worker, candidate, reason):
     from .campaign_batching import telegram_retry
     job = candidate.job
     matches = {}
+    visuals = {}
+    conflicts = set()
     for placement in candidate.placements:
+        if conflicting_numbers(candidate.actual.text,placement):
+            conflicts.add(placement['id'])
+            continue
         exact = offline_match(candidate.messages, placement)
         if exact.matched:
             matches[placement['id']] = exact.reason
@@ -120,12 +162,22 @@ async def check_candidate(worker, candidate, reason):
     media_error = ''
     if not matches and candidate.actual.media:
         try:
-            actual = await asyncio.to_thread(image_fingerprints, await worker.candidate_images(candidate.messages))
-            if actual:
+            actual_parts=await worker.candidate_images(candidate.messages)
+            actual = await asyncio.to_thread(image_fingerprints,actual_parts)
+            if actual_parts:
                 for placement in candidate.placements:
-                    expected = await asyncio.to_thread(image_fingerprints, await worker.reference_images(placement))
+                    if placement['id'] in conflicts:continue
+                    expected_parts=await worker.reference_images(placement)
+                    expected = await asyncio.to_thread(image_fingerprints,expected_parts)
                     if actual & expected:
                         matches[placement['id']] = 'offline:совпадают пиксели согласованного рекламного изображения'
+                        visuals[placement['id']]={i for i,part in enumerate(actual_parts) if image_fingerprints([part]) & expected}
+                    elif expected_parts:
+                        from .campaign_visual import matching_indices
+                        indices=await asyncio.to_thread(matching_indices,actual_parts,expected_parts)
+                        if indices:
+                            matches[placement['id']] = 'offline:совпадает рекламное изображение после изменения размера, сжатия или обрезки'
+                            visuals[placement['id']]=indices
         except errors.FloodWaitError:
             raise
         except (OSError, asyncio.TimeoutError, errors.RPCError, ValueError):
@@ -146,6 +198,7 @@ async def check_candidate(worker, candidate, reason):
         return
     if partner['status'] != 'active':
         return
+    matches=equivalent_matches(matches,placements,visuals)
     if matches:
         try:
             refreshed = await worker.monitor.client.get_messages(candidate.entity, ids=json.loads(job['message_ids']))
@@ -175,9 +228,10 @@ async def check_candidate(worker, candidate, reason):
             return
     # Keep local checks distinct from authoritative AI negatives. Only plausible
     # or ambiguous matches enter the human-review list; other checks are logged.
-    suspect = bool(matches or media_error or job['priority'] >= 200 or job.get('individual_review'))
+    suspect = bool(matches or media_error or conflicts or job['priority'] >= 200 or job.get('individual_review'))
     status = 'offline_review' if suspect else 'local_checked'
     detail = ('Несколько подходящих материалов; нужна сверка.' if matches else
+              'Числовые условия отличаются; нужна сверка.' if conflicts else
               'Изображение не прочитано: ' + media_error if media_error else
               'Точное совпадение не подтверждено; смысловое сравнение не выполнялось.')
     worker.finish(job, status, 'Проверено без ИИ. ' + detail,

@@ -27,6 +27,9 @@ def current(worker,job):
 
 def maintain_queue(worker):
     store=worker.store
+    if not store.state('campaign_local_rules_v2',''):
+        store.execute("UPDATE campaign_checks SET status='pending',next_try_at=? WHERE status IN ('local_checked','offline_review')",(utcnow(),))
+        store.set_state('campaign_local_rules_v2',utcnow())
     if not store.state('campaign_batch_labels_v2',''):
         store.execute("UPDATE campaign_checks SET next_try_at=? WHERE status='error' AND reason LIKE 'http_400%'",(utcnow(),))
         store.set_state('campaign_batch_labels_v2',utcnow())

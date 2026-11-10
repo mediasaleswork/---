@@ -8,6 +8,8 @@ google-auth-oauthlib==1.5.0
 greenlet==3.5.6
 idna==3.20
 oauthlib==4.0.1
+numpy==2.5.4
+opencv-python-headless==4.13.0.92
 openpyxl==3.1.5
 pillow==12.3.0
 playwright==1.64.1

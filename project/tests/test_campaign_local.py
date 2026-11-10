@@ -135,7 +135,7 @@ class LocalTests(unittest.IsolatedAsyncioTestCase):
         settle_placements(self.monitor.campaign_worker)
         self.assertEqual(self.store.rows('SELECT status FROM placements')[0]['status'], 'watching')
 
-    async def test_ambiguous_video_identity_is_reviewed_instead_of_counted_twice(self):
+    async def test_alternative_references_to_same_video_count_as_one_exit(self):
         self.batch(candidates=[message(7, 'Смотрите фильм https://youtu.be/AbCdEfGhI_1')])
         self.consume(message(4, 'Название: Film\nКанал: @partner_one\nТекст рекламы: Другой фильм https://youtu.be/AbCdEfGhI_1', peer=100))
         self.consume(message(5, 'Превью', peer=100))
@@ -144,8 +144,9 @@ class LocalTests(unittest.IsolatedAsyncioTestCase):
         await self.queue_only()
         self.exhaust_budget()
         await self.monitor.campaign_worker.process()
-        self.assertFalse(self.store.rows('SELECT * FROM posts'))
-        self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'], 'offline_review')
+        self.assertEqual(len(self.store.rows('SELECT * FROM posts')),1)
+        self.assertEqual(len(self.store.rows('SELECT * FROM placement_posts')),1)
+        self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'], 'match')
 
     async def test_report_distinguishes_local_checks_from_unprocessed_jobs(self):
         from openpyxl import load_workbook

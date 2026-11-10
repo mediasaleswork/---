@@ -17,7 +17,8 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.workbook.properties import CalcProperties
 
-from .report_view import build_view
+from .report_view import build_view,local
+from zoneinfo import ZoneInfo
 
 RED = "EE343D"
 INK = "26272B"
@@ -29,6 +30,7 @@ DATE_FORMAT = "yyyy-mm-dd hh:mm"
 def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashkent", month=None, note="", compact=False):
     from .reports import _cell, _tables, _write_table, _ordered
     view = build_view(partners, posts, snapshots, timezone, month)
+    tz = ZoneInfo(timezone)
     selected = {p["id"] for p in view["records"]}
     filtered_posts = [p for p in posts if p["id"] in selected]
     filtered_snapshots = [s for s in snapshots if s["post_id"] in selected]
@@ -92,7 +94,10 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     report.merge_cells("A4:L4")
     put(report, 4, 1, f"Время: {timezone}" if compact else f"Период публикаций: {month or 'все даты'}. Время: {timezone}. Заказано, опубликовано и осталось — за весь срок заявки.")
     report.merge_cells("A5:L5")
-    put(report, 5, 1, note if compact else note or "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён.")
+    pending=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'pending','error'})
+    unknown={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) }
+    queue_note=f"Ожидают распознавания: {pending}. Не удалось повторно открыть: {len(unknown)} (не засчитаны; см. «Недоступные посты»)." if any('campaign_queue' in p for p in partners) else ''
+    put(report, 5, 1, note or queue_note or ('' if compact else "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён."))
     report.row_dimensions[5].height = 30
     band(report, 7, "СВОДКА ПО ПЛОЩАДКАМ")
     headers = ["№", "Инструмент", "Площадки", "Язык", "Заказано постов", "Опубликовано", "Осталось опубликовать", "Постов за период", "Не удалось открыть", "Постов со скриншотом", "Последняя публикация", "Публикации"]
@@ -265,16 +270,30 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         jump(detail.cell(row, 9), "Отчёт", f"A{anchors[post['id']]}", "Открыть снимок")
     unavailable_headers = ["Инструмент", "Площадки", "Пост", "Состояние", "Опубликован", "Последняя проверка", "Недоступен с", "Последние просмотры", "Снимок", "Причина"]
     unavailable_rows = [unavailable_headers] + [[p["client"].replace("Клиент не указан", "Инструмент не указан"), p["channel"], p["url"], p["state"], None, None, None, p["views"], "Открыть снимок", p["error"]] for p in view["unavailable"]]
+    waiting=[];seen_waiting=set()
+    import json
+    for partner in partners:
+        for job in partner.get('campaign_checks',[]):
+            key=(partner['id'],job['message_ids'])
+            if key in seen_waiting:continue
+            seen_waiting.add(key)
+            mid=min(json.loads(job['message_ids']))
+            url=f"https://t.me/{partner['username']}/{mid}" if partner.get('username') else f"https://t.me/c/{partner.get('channel_id')}/{mid}"
+            info=json.loads(job.get('candidate_snapshot') or '{}')
+            reason=job['reason']+' Повтор: '+shown_time(local(job['next_try_at'],tz))+'.'
+            waiting.append((job,info))
+            unavailable_rows.append(['Не подтверждено',partner.get('title') or partner.get('username'),url,
+                'Не засчитано — проверка доступности',None,None,None,info.get('views'),'',reason])
     _write_table(unavailable, unavailable_rows)
     for row, item in enumerate(view["unavailable"], 2):
         date_cell(unavailable, row, 5, item["published"])
         date_cell(unavailable, row, 6, item["checked"])
         date_cell(unavailable, row, 7, item["unavailable_since"])
         jump(unavailable.cell(row, 9), "Отчёт", f"A{anchors[item['id']]}", "Последний снимок")
+    for row,(job,info) in enumerate(waiting,start=2+len(view['unavailable'])):
+        date_cell(unavailable,row,5,local(info.get('published_at'),tz))
+        date_cell(unavailable,row,6,local(job.get('checked_at'),tz))
     _write_table(history_sheet, history)
-    from .report_view import local
-    from zoneinfo import ZoneInfo
-    tz = ZoneInfo(timezone)
     post_by_id = {p["id"]: p for p in filtered_posts}
     for row, snap in enumerate(_ordered(filtered_snapshots), 2):
         post = post_by_id[snap["post_id"]]

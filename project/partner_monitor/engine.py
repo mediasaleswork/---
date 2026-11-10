@@ -60,6 +60,7 @@ class Monitor:
         self._allowed_origins = None
         self.campaign_wake = asyncio.Event()
         self.campaign_worker = None
+        self.campaign_background = False
         self._folder_checked = 0.0
         if config.campaign_matching:
             from .campaigns import CampaignWorker
@@ -530,10 +531,13 @@ class Monitor:
                 self.store.execute("UPDATE partners SET status=?,last_error=? WHERE id=?", ("unavailable" if partner["username"] else "private", f"Не удалось проверить канал: {type(exc).__name__}; доступ не подтверждён" if not partner["username"] else f"Не удалось проверить канал: {type(exc).__name__}", partner["id"]))
                 log.warning("Канал @%s недоступен: %s", partner["username"], type(exc).__name__)
         if self.campaign_worker:
-            try:
-                await self.campaign_worker.process()
-            except Exception as exc:
-                log.warning("Распознавание отложено (%s); задания сохранены", type(exc).__name__)
+            if self.campaign_background:
+                self.campaign_wake.set()
+            else:
+                try:
+                    await self.campaign_worker.process()
+                except Exception as exc:
+                    log.warning("Распознавание отложено (%s); задания сохранены", type(exc).__name__)
 
 
 async def publish_reports(config, store):
@@ -564,6 +568,7 @@ async def run(config: Config, *, once: bool = False):
                     realtime.start()
                     publisher = asyncio.create_task(report_loop(monitor))
                     if monitor.campaign_worker:
+                        monitor.campaign_background = True
                         from .campaigns import campaign_loop
                         campaign_task = asyncio.create_task(campaign_loop(monitor))
                 try:

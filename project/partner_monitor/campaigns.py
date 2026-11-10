@@ -116,9 +116,11 @@ def enqueue(store, config, partner, messages, placements):
         priority += 200
     if re.search(r"реклама|ҳамкорлик|hamkorlik|reklama", actual.text, re.I):
         priority += 20
+    snapshot=packed({'text':actual.text,'urls':actual.urls,'media':actual.media,
+        'published_at':messages[0].date.isoformat(),'views':getattr(messages[0],'views',None)})
     store.execute("""INSERT OR IGNORE INTO campaign_checks(id,partner_id,message_ids,placement_ids,
-        source_signature,candidate_signature,next_try_at,created_at,priority) VALUES (?,?,?,?,?,?,?,?,?)""",
-        (ident, partner["id"], packed(ids), packed(sorted(p["id"] for p in placements)), source, candidate, stamp, stamp, priority))
+        source_signature,candidate_signature,next_try_at,created_at,priority,candidate_snapshot) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (ident, partner["id"], packed(ids), packed(sorted(p["id"] for p in placements)), source, candidate, stamp, stamp, priority,snapshot))
 
 
 def validate_decision(value, campaign_ids):
@@ -192,6 +194,27 @@ class GeminiCampaignJudge:
         self.model = model
 
     def compare(self, content):
+        return self.request(content,PROMPT,SCHEMA,4000)
+
+    def compare_many(self,content,job_ids):
+        item={'type':'object','additionalProperties':False,
+            'properties':{'job_id':{'type':'string','enum':list(job_ids)},**SCHEMA['properties']},
+            'required':['job_id',*SCHEMA['required']]}
+        schema={'type':'object','additionalProperties':False,'properties':{'results':{'type':'array',
+            'minItems':len(job_ids),'maxItems':len(job_ids),'items':item}},'required':['results']}
+        prompt=PROMPT+'\nThere are several INDEPENDENT PUBLICATION blocks, each with job_id. Compare each ONLY against the REFERENCE blocks, never against other publications. Return exactly one result for each job_id. Do not transfer a matching detail or an image from one publication to another. Keep each reason under 180 characters.'
+        value=self.request(content,prompt,schema,8192)
+        if not isinstance(value,dict) or set(value)!={'results'} or not isinstance(value['results'],list):
+            raise CampaignAPIError('invalid_batch_response')
+        results={}
+        for row in value['results']:
+            if not isinstance(row,dict) or set(row)!={'job_id',*SCHEMA['required']} or row['job_id'] not in job_ids or row['job_id'] in results:
+                raise CampaignAPIError('invalid_batch_response')
+            results[row['job_id']]={k:v for k,v in row.items() if k!='job_id'}
+        if set(results)!=set(job_ids):raise CampaignAPIError('incomplete_batch_response')
+        return results
+
+    def request(self,content,prompt,schema,max_tokens):
         key = os.environ.get(self.key_variable, "").strip()
         if not key:
             raise CampaignAPIError("missing_api_key")
@@ -204,11 +227,11 @@ class GeminiCampaignJudge:
                 if not url.startswith("data:image/jpeg;base64,"):
                     raise CampaignAPIError("invalid_image")
                 parts.append({"inlineData": {"mimeType": "image/jpeg", "data": url.split(",", 1)[1]}})
-        body = {"systemInstruction": {"parts": [{"text": PROMPT}]},
+        body = {"systemInstruction": {"parts": [{"text": prompt}]},
                 "contents": [{"role": "user", "parts": parts}],
-                "generationConfig": {"maxOutputTokens": 4000,
+                "generationConfig": {"maxOutputTokens": max_tokens,
                     "thinkingConfig": {"thinkingLevel": "MINIMAL"},
-                    "responseMimeType": "application/json", "responseJsonSchema": SCHEMA}}
+                    "responseMimeType": "application/json", "responseJsonSchema": schema}}
         try:
             with requests.post("https://generativelanguage.googleapis.com/v1beta/models/" + self.model + ":generateContent", json=body,
                     headers={"x-goog-api-key": key}, timeout=(10, 60), allow_redirects=False) as response:
@@ -258,6 +281,7 @@ class CampaignWorker:
         factory = GeminiCampaignJudge if self.config.campaign_provider == "gemini" else OpenAICampaignJudge
         self.judge = judge or factory(self.config.campaign_model)
         self.lock = asyncio.Lock()
+        self.reference_cache={}
 
     async def images(self, messages):
         result = []
@@ -278,6 +302,8 @@ class CampaignWorker:
         expected = set(json.loads(placement.get("media_keys") or "[]"))
         if not expected:
             return []
+        key=digest([placement['source_chat_id'],placement['source_message_id'],placement.get('draft_id'),sorted(expected)])
+        if key in self.reference_cache:return self.reference_cache[key]
         # Later image corrections belong to the latest media revision, not
         # necessarily to the draft's first/anchor message.
         rows = self.store.rows("SELECT message_id,media_keys FROM source_messages WHERE draft_id=? ORDER BY message_id DESC",
@@ -290,7 +316,10 @@ class CampaignWorker:
         members = await self.monitor.album(source, message)
         if not expected.intersection(combined_content(members).media):
             raise CampaignAPIError("reference_media_changed")
-        return await self.images(members)
+        result=await self.images(members)
+        if len(self.reference_cache)>=64:self.reference_cache.clear()
+        self.reference_cache[key]=result
+        return result
 
     async def process(self):
         # One request at a time across history/live callbacks; daily attempts
@@ -300,6 +329,11 @@ class CampaignWorker:
 
     async def _process(self):
         if self.monitor.source_peer_id is None:
+            return
+        from .campaign_queue import maintain_queue,process_batch
+        maintain_queue(self)
+        if callable(getattr(type(self.judge),'compare_many',None)):
+            await process_batch(self)
             return
         if self.store.state("campaign_quota_retry_at", "") > utcnow():
             return
@@ -335,7 +369,8 @@ class CampaignWorker:
                 messages = await self.monitor.client.get_messages(entity, ids=json.loads(job["message_ids"]))
                 messages = sorted([m for m in messages if isinstance(m, types.Message)], key=lambda m: m.id)
                 if len(messages) != len(json.loads(job["message_ids"])):
-                    self.finish(job, "review", "Публикация недоступна; совпадение не засчитано")
+                    from .campaign_queue import unavailable
+                    unavailable(self,job)
                     continue
                 if candidate_signature(messages) != job["candidate_signature"]:
                     self.finish(job, "obsolete", "Публикация отредактирована; проверим её новую версию")
@@ -401,7 +436,7 @@ class CampaignWorker:
                 self.finish(job, "review", "Некорректный ответ распознавания; совпадение не засчитано")
         # A finished history scan is not a negative result while a queued or
         # uncertain candidate still exists. Once all are rejected, close it.
-        waiting = {pid for j in self.store.rows("SELECT placement_ids FROM campaign_checks WHERE status IN ('pending','error','review')")
+        waiting = {pid for j in self.store.rows("SELECT placement_ids FROM campaign_checks WHERE status IN ('pending','error','review','unavailable')")
                    for pid in json.loads(j["placement_ids"])}
         for placement in self.store.rows("SELECT id FROM placements WHERE scan_complete=1 AND status='watching'"):
             if placement["id"] not in waiting:
@@ -418,7 +453,10 @@ class CampaignWorker:
 
 async def campaign_loop(monitor):
     while True:
-        await monitor.campaign_wake.wait()
+        try:
+            await asyncio.wait_for(monitor.campaign_wake.wait(),timeout=10)
+        except asyncio.TimeoutError:
+            pass
         monitor.campaign_wake.clear()
         try:
             await monitor.campaign_worker.process()

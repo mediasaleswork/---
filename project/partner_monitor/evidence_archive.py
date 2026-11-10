@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 def report_payload(partners, posts, snapshots, *, include_urls=True):
     def clean(value):
         if isinstance(value, dict):
-            omitted = {"intake", "last_message_id", "last_checked_at", "screenshot_path"}
+            omitted = {"intake", "last_message_id", "last_checked_at", "screenshot_path", "campaign_checks", "campaign_queue"}
             if not include_urls:
                 omitted.add("screenshot_url")
             return {key: clean(item) for key, item in value.items() if key not in omitted}

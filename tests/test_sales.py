@@ -161,6 +161,23 @@ class SalesTests(unittest.TestCase):
         self.assertFalse(RuleResearcher().classify([dict(self.source,text=text,title=text)],NOW))
         self.assertFalse(is_advertisement('Реклама в Telegram становится популярной: компания рассказала о тенденциях рынка.'))
 
+    def test_advertiser_is_not_a_location_product_or_research_title(self):
+        examples=[
+            ('2 KUNDAN SO‘NG BIRINCHI G‘OLIBLAR ANIQLANADI! ASLZAR’dan uy va avtomobil yutib olish imkoniyati tobora yaqinlashmoqda! #реклама','ASLZAR',()),
+            ('Chimyonda tayyor apartamentlar sotiladi. Dam olish uchun ham apartament xarid qiling. Batafsil maʼlumot uchun MKBANKga murojaat qiling! Reklama','MKBANK',()),
+            ('Бизнесингиз учун Apple Pay’ни Click орқали уланг! Click — бизнес учун Apple Pay тўлов ечимини улаш бўйича Apple ҳамкори. Реклама','Click',()),
+            ('В Ташкенте подвели итоги исследования CX Banking Index 2026. Награждение прошло на площадке Uztelecom, который выступил соорганизатором (реклама).','Uztelecom',('Uztelecom',)),
+            ('Платёжная система Visa отметила Octobank наградой Digital Wallets Launch Excellence за успешное внедрение цифровых платёжных решений (реклама).','Octobank',()),
+            ('Квартал Mirabad Square получил системы кондиционирования: стратегическое партнёрство Apex Development и Daikin предусматривает оснащение всех квартир (реклама).','Apex Development',()),
+            ('Iskander Buildings Mezbon — новый жилой проект с удобными квартирами, инфраструктурой и современными решениями для семей (реклама).','Iskander Buildings',())]
+        for text,company,known in examples:
+            source=dict(self.source,text=text,title=text[:180])
+            found=RuleResearcher(known).classify([source],NOW)
+            self.assertEqual(len(found),1,text)
+            lead=validate(found[0],{source['id']:source},NOW)
+            self.assertIsNotNone(lead,text)
+            self.assertEqual(lead['company'],company)
+
     def test_repeat_brand_updates_latest_fact_and_keeps_every_post(self):
         lead=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)
         self.store.add_lead(lead);ident=lead['id']

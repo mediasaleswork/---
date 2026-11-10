@@ -36,7 +36,8 @@ HYPOTHESES = {
 
 AD_MARKER=re.compile(r'\(\s*(?:реклама|reklama|advertisement)\s*\)|(?<!\w)#(?:реклама|reklama|ad)\b|(?<!\w)(?:реклама|reklama|advertisement)\s*[.!]?\s*$',re.I)
 AD_NAME=re.compile(r"[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,5}")
-AD_STOP={'IT','HR','EIOS','III','II','I','IV','V','VI','VII','VIII','IX','X','Batafsil','Reklama','Telegram','Instagram','Facebook','Sayt','The','Today'}
+AD_STOP={'IT','HR','EIOS','III','II','I','IV','V','VI','VII','VIII','IX','X','Batafsil','Reklama','Telegram','Instagram','Facebook','Sayt','The','Today',
+    'KUNDAN','SO‘NG','BIRINCHI','ANIQLANADI','JAMI','SOVG‘A','Chimyonda','Dam'}
 
 
 def is_advertisement(text):
@@ -48,16 +49,26 @@ def advertising_brand(text,known):
     organiser=re.search(r'(?i:организован\w*|организатор\w*)\s+(?P<name>'+LATIN+r')',text)
     if organiser:
         return organiser.group('name'),organiser.start('name'),organiser.end('name')
-    aliases=[('Yandex','Yandex'),('Wuling','Wuling'),('ASUS','ASUS'),('HUMO','HUMO'),('NBU','NBU')]
-    for pattern,name in aliases:
-        match=re.search(r'(?<!\w)'+pattern+r'(?!\w)',text[:500])
+    aliases=['Yandex','Wuling','ASUS','HUMO','NBU','Click','MKBANK','ASLZAR','Kia','Uztelecom']
+    for pattern in aliases:
+        match=re.search(r'(?<!\w)'+pattern+r'(?=$|\W|(?:ga|dan|ning|ni|da)\b)',text[:1500])
         if match:return text[match.start():match.end()],match.start(),match.end()
+    # In awards stories the recipient, rather than the payment network, is the prospect.
+    recipient=re.search(r'(?i:отметил\w*)\s+(?P<name>'+LATIN+r')\s+(?i:наград\w*)',text)
+    if recipient:return recipient.group('name'),recipient.start('name'),recipient.end('name')
+    # A corporate name is stronger evidence than a named residential project or research index.
+    corporate=re.search(r'(?P<name>[A-Z][A-Za-z0-9-]*(?:\s+[A-Z][A-Za-z0-9-]*){0,2}\s+(?:Development|Buildings|Insurance|University))\b',text[:1000])
+    if corporate:return corporate.group('name'),corporate.start('name'),corporate.end('name')
+    for name,start,end in brands(text,known):
+        if name.casefold() in {v.casefold() for v in known} and name not in AD_STOP and not re.search(r'\b(?:Index|Apple Pay)\b',name):
+            return name,start,end
     # Inspect the headline before names of interviewees, products and footer links.
     candidates=[]
     for match in AD_NAME.finditer(text[:240]):
         name=match.group().strip()
         if name in AD_STOP or EXCLUDE.search(name):continue
-        if re.search(r'\b(?:Expo|Marathon|Forum|Olympiad|Medicine of the Future)\b',name,re.I):continue
+        name=re.sub(r"['’ʼʻ](?:dan|ning|ni|ga|da)\b.*$",'',name).rstrip("'’ʼʻ")
+        if re.search(r'\b(?:Expo|Marathon|Forum|Olympiad|Index|Apple Pay|Medicine of the Future)\b',name,re.I):continue
         first=name.split()[0]
         if first in AD_STOP:continue
         if first.isupper() and len(first)>=3:

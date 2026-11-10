@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import math
 from pathlib import Path
 
@@ -94,10 +95,16 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     report.merge_cells("A4:L4")
     put(report, 4, 1, f"Время: {timezone}" if compact else f"Период публикаций: {month or 'все даты'}. Время: {timezone}. Заказано, опубликовано и осталось — за весь срок заявки.")
     report.merge_cells("A5:L5")
-    pending=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'pending','error'})
-    unknown={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' }
+    def has_caption(job):
+        try:value=json.loads(job.get('candidate_snapshot') or '{}')
+        except (ValueError,TypeError):return False
+        return isinstance(value,dict) and isinstance(value.get('text'),str) and len(value['text'].strip())>=40
+    archive_pending={(p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' and has_caption(j)}
+    pending=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'pending','error'})+len(archive_pending)
+    unknown={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' and not has_caption(j) }
     review={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status')=='review' }
-    queue_note=f"Ожидают распознавания: {pending}. Недоступны: {len(unknown)}. Нужна сверка: {len(review)} (не засчитаны; см. «Недоступные посты»)." if any('campaign_queue' in p for p in partners) else ''
+    archived={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status')=='archived_no_match' }
+    queue_note=f"Ожидают распознавания: {pending}. Без сохранённого текста: {len(unknown)}. Архивная сверка: {len(archived)}. Нужна сверка: {len(review)} (см. «Недоступные посты»)." if any('campaign_queue' in p for p in partners) else ''
     put(report, 5, 1, note or queue_note or ('' if compact else "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён."))
     report.row_dimensions[5].height = 30
     band(report, 7, "СВОДКА ПО ПЛОЩАДКАМ")
@@ -272,7 +279,6 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     unavailable_headers = ["Инструмент", "Площадки", "Пост", "Состояние", "Опубликован", "Последняя проверка", "Недоступен с", "Последние просмотры", "Снимок", "Причина"]
     unavailable_rows = [unavailable_headers] + [[p["client"].replace("Клиент не указан", "Инструмент не указан"), p["channel"], p["url"], p["state"], None, None, None, p["views"], "Открыть снимок", p["error"]] for p in view["unavailable"]]
     waiting=[];seen_waiting=set()
-    import json
     for partner in partners:
         for job in partner.get('campaign_checks',[]):
             key=(partner['id'],job['message_ids'])
@@ -282,10 +288,11 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
             url=f"https://t.me/{partner['username']}/{mid}" if partner.get('username') else f"https://t.me/c/{partner.get('channel_id')}/{mid}"
             info=json.loads(job.get('candidate_snapshot') or '{}')
             needs_review=job.get('status')=='review'
+            is_archived=job.get('status')=='archived_no_match'
             reason=job['reason']+(' Требуется проверка совпадения.' if needs_review else ' Повтор: '+shown_time(local(job['next_try_at'],tz))+'.')
             waiting.append((job,info))
             unavailable_rows.append(['Не подтверждено',partner.get('title') or partner.get('username'),url,
-                'Не засчитано — нужна сверка' if needs_review else 'Не засчитано — проверка доступности',None,None,None,info.get('views'),'',reason])
+                'Архивный текст — нет совпадения' if is_archived else 'Не засчитано — нужна сверка' if needs_review else 'Не засчитано — проверка доступности',None,None,None,info.get('views'),'',reason])
     _write_table(unavailable, unavailable_rows)
     for row, item in enumerate(view["unavailable"], 2):
         date_cell(unavailable, row, 5, item["published"])

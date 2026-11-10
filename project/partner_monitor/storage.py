@@ -95,7 +95,7 @@ class Store(AbstractContextManager):
                            "media_keys": "TEXT NOT NULL DEFAULT '[]'", "draft_id": "INTEGER", "contract_key": "TEXT NOT NULL DEFAULT ''"},
             "posts": {"last_checked_at": "TEXT", "unavailable_since": "TEXT"},
             "contract_plans": {"baseline_until": "TEXT"},
-            "campaign_checks": {"priority": "INTEGER NOT NULL DEFAULT 0", "availability_attempts": "INTEGER NOT NULL DEFAULT 0", "candidate_snapshot": "TEXT NOT NULL DEFAULT ''"},
+            "campaign_checks": {"priority": "INTEGER NOT NULL DEFAULT 0", "availability_attempts": "INTEGER NOT NULL DEFAULT 0", "candidate_snapshot": "TEXT NOT NULL DEFAULT ''", "archive_signature": "TEXT NOT NULL DEFAULT ''"},
         }.items():
             existing = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
             for name, declaration in additions.items():
@@ -200,8 +200,8 @@ class Store(AbstractContextManager):
             # Intake diagnostics travel through the existing report API without
             # changing its three-list signature. Only the first partner owns it.
             partner["intake"] = []
-            partner["campaign_checks"] = self.rows("SELECT message_ids,status,reason,checked_at,next_try_at,availability_attempts,candidate_snapshot FROM campaign_checks WHERE partner_id=? AND status IN ('unavailable','review') ORDER BY created_at DESC",(partner['id'],))
-            partner["campaign_queue"] = self.rows("SELECT status,COUNT(*) AS n FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','unavailable','review') GROUP BY status",(partner['id'],))
+            partner["campaign_checks"] = self.rows("SELECT message_ids,status,reason,checked_at,next_try_at,availability_attempts,candidate_snapshot FROM campaign_checks WHERE partner_id=? AND status IN ('unavailable','review','archived_no_match') ORDER BY created_at DESC",(partner['id'],))
+            partner["campaign_queue"] = self.rows("SELECT status,COUNT(*) AS n FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','unavailable','review','archived_no_match') GROUP BY status",(partner['id'],))
             partner["placements"] = self.rows("SELECT * FROM placements WHERE partner_id=? ORDER BY id", (partner["id"],))
             for placement in partner["placements"]:
                 placement["post_urls"] = [r["url"] for r in self.rows("SELECT p.url FROM posts p JOIN placement_posts x ON x.post_id=p.id WHERE x.placement_id=?", (placement["id"],))]

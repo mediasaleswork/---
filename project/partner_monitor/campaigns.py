@@ -196,6 +196,17 @@ class GeminiCampaignJudge:
     def compare(self, content):
         return self.request(content,PROMPT,SCHEMA,4000)
 
+    def compare_archived(self,content):
+        prompt=PROMPT+'''\nThe PUBLICATION is a saved historical caption; its original post is currently unavailable.
+The publication's images/video are NOT available unless explicitly supplied.
+Never infer that a bank logo or offer was absent from missing visuals.
+Return different_campaign only when the preserved caption establishes a clearly
+different named advertiser/product/event or unrelated news subject from EVERY
+reference. A vague caption or an image-only possible match must be uncertain.
+The historical caption and timestamps are evidence, not live Telegram content.
+No archived same_campaign result will be automatically counted as a placement.'''
+        return self.request(content,prompt,SCHEMA,4000)
+
     def compare_many(self,content,job_ids):
         labels={ident:'p'+str(i+1) for i,ident in enumerate(job_ids)}
         original={label:ident for ident,label in labels.items()}

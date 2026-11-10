@@ -45,7 +45,7 @@ def maintain_queue(worker):
         store.execute("UPDATE campaign_checks SET status='unavailable',next_try_at=? WHERE status='review' AND reason='Публикация недоступна; совпадение не засчитано'",(utcnow(),))
         store.set_state('campaign_unavailable_retry_v1',utcnow())
     groups={}
-    for job in store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable') ORDER BY created_at DESC"):
+    for job in store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match') ORDER BY created_at DESC"):
         partner,placements=current(worker,job)
         if not partner:
             worker.finish(job,'obsolete','Настройки, материал или область наблюдения изменились')
@@ -67,7 +67,7 @@ def save_status(worker):
     store=worker.store
     data={'checked_at':utcnow(),'counts':store.rows('SELECT status,COUNT(*) AS n FROM campaign_checks GROUP BY status'),
         'oldest_pending':store.rows("SELECT MIN(created_at) AS created_at FROM campaign_checks WHERE status IN ('pending','error')"),
-        'unavailable':store.rows("SELECT p.username,j.message_ids,j.reason,j.availability_attempts,j.next_try_at FROM campaign_checks j JOIN partners p ON p.id=j.partner_id WHERE j.status='unavailable'")}
+        'unavailable':store.rows("SELECT p.username,j.message_ids,j.status,j.reason,j.availability_attempts,j.next_try_at FROM campaign_checks j JOIN partners p ON p.id=j.partner_id WHERE j.status IN ('unavailable','archived_no_match')")}
     store.set_state('campaign_queue_status',packed(data))
     # Operational details remain on the service's existing private volume.
     root=worker.config.runtime_dir
@@ -76,14 +76,14 @@ def save_status(worker):
     temporary.write_text(packed(data),encoding='utf-8');temporary.replace(path)
 
 
-def unavailable(worker,job):
+def unavailable(worker,job,archived=False):
     count=job.get('availability_attempts',0)+1
     delay=min(240,5*2**min(count-1,6))
     retry=(datetime.now(timezone.utc)+timedelta(minutes=delay)).isoformat()
-    worker.store.execute("""UPDATE campaign_checks SET status='unavailable',reason=?,
+    worker.store.execute("""UPDATE campaign_checks SET status=?,reason=?,
         availability_attempts=availability_attempts+1,next_try_at=?,checked_at=?
-        WHERE partner_id=? AND message_ids=? AND status IN ('pending','error','review','unavailable')""",
-        ('Telegram не вернул публикацию; удаление не подтверждено. Повторная проверка запланирована.',retry,utcnow(),job['partner_id'],job['message_ids']))
+        WHERE partner_id=? AND message_ids=? AND status IN ('pending','error','review','unavailable','archived_no_match')""",
+        ('archived_no_match' if archived else 'unavailable',job['reason'] if archived else 'Telegram не вернул публикацию; удаление не подтверждено. Повторная проверка запланирована.',retry,utcnow(),job['partner_id'],job['message_ids']))
     worker.monitor.changed.set()
 
 
@@ -112,8 +112,8 @@ async def process_batch(worker):
         for _ in range(worker.config.campaign_batch_size):
             now=utcnow()
             ai_ready=store.state('campaign_quota_retry_at','')<=now and store.state('campaign_next_request_at','')<=now and budget(worker)
-            jobs=store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT 1000",(now,))
-            if not ai_ready:jobs=[j for j in jobs if j['status']=='unavailable']
+            jobs=store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT 1000",(now,))
+            if not ai_ready:jobs=[j for j in jobs if j['status'] in ('unavailable','archived_no_match')]
             if not jobs:return
             turn=int(store.state('campaign_queue_turn'));store.set_state('campaign_queue_turn',turn+1)
             # Every fourth request starts with the newest candidate, including
@@ -145,7 +145,11 @@ async def process_batch(worker):
                 for job in group:
                     messages=[messages_by_id[mid] for mid in json.loads(job['message_ids']) if mid in messages_by_id]
                     if len(messages)!=len(json.loads(job['message_ids'])):
-                        if job['message_ids'] not in missing:unavailable(worker,job)
+                        if job['message_ids'] not in missing:
+                            from .archived_checks import check_saved_caption
+                            outcome=await check_saved_caption(worker,job,partner,placements,entity,ai_ready)
+                            if outcome=='requested':return
+                            if outcome!='cached':unavailable(worker,job)
                         missing.add(job['message_ids']);continue
                     if candidate_signature(messages)!=job['candidate_signature']:
                         worker.finish(job,'obsolete','Публикация отредактирована; проверим новую версию')
@@ -154,7 +158,7 @@ async def process_batch(worker):
                     if any(set(m.id for m in messages)&set(json.loads(p['message_ids'])) for p in recorded):
                         worker.finish(job,'obsolete','Публикация уже учтена');continue
                     actual=combined_content(messages)
-                    if job['status']=='unavailable':store.execute("UPDATE campaign_checks SET status='pending',reason='' WHERE id=?",(job['id'],))
+                    if job['status'] in ('unavailable','archived_no_match'):store.execute("UPDATE campaign_checks SET status='pending',reason='' WHERE id=?",(job['id'],))
                     snapshot=packed({'text':actual.text,'urls':actual.urls,'media':actual.media,
                         'published_at':messages[0].date.isoformat(),'views':getattr(messages[0],'views',None)})
                     store.execute('UPDATE campaign_checks SET candidate_snapshot=? WHERE id=?',(snapshot,job['id']))

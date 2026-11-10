@@ -24,17 +24,20 @@ class CompactGoogleTests(unittest.TestCase):
         self.calls = []
         self.saved_posts = []
         self.saved_history = []
+        self.saved_reviews = []
 
     def metadata(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
         if url.endswith("/values:batchGet"):
-            return {"valueRanges": [{"values": [["Ссылка на пост"], *self.saved_posts]},
-                {"values": [["Ссылка на пост", "Дата", "Замер", "Просмотры", "Контрольная точка", "Снимок", "Статус"], *self.saved_history]}]}
+            ranges=[{"values": [["Ссылка на пост"], *self.saved_posts]},
+                {"values": [["Ссылка на пост", "Дата", "Замер", "Просмотры", "Контрольная точка", "Снимок", "Статус"], *self.saved_history]}]
+            if len(kwargs['params']['ranges'])==3:ranges.append({'values':[['ID проверки'],*self.saved_reviews]})
+            return {"valueRanges":ranges}
         if "drive/v3/files" in url:
             return {"mimeType": SHEETS, "appProperties": {MARKER: VALUE}}
         return {"sheets": [{"properties": {"title": n, "sheetId": i}} for i, n in enumerate(REPORT_SHEETS)]}
 
-    def test_compact_report_has_two_visible_tabs_and_real_embedded_evidence(self):
+    def test_compact_report_has_three_visible_tabs_and_real_embedded_evidence(self):
         self.reporter._json = self.metadata
         self.reporter._upload = Mock(return_value=None)
         captured = []
@@ -45,7 +48,7 @@ class CompactGoogleTests(unittest.TestCase):
         book = load_workbook(BytesIO(captured[0]))
         self.addCleanup(book.close)
         self.assertEqual(book.sheetnames, list(REPORT_SHEETS))
-        self.assertEqual([s.title for s in book if s.sheet_state == "visible"], ["Отчёт", "Недоступные посты"])
+        self.assertEqual([s.title for s in book if s.sheet_state == "visible"], ["Отчёт", "Ручная проверка", "Недоступные посты"])
         self.assertEqual(len(book["Отчёт"]._images), 1)
         self.assertEqual(book["Отчёт"]["E8"].value, "План")
         self.assertIsNone(book["Отчёт"]["A5"].value)
@@ -92,6 +95,23 @@ class CompactGoogleTests(unittest.TestCase):
                 self.reporter.sync([], [], [])
             replace.assert_not_called()
             self.reporter._upload.assert_not_called()
+
+    def test_losing_manual_review_history_blocks_replacement(self):
+        self.saved_reviews=[['preserved-review-id']]
+        self.reporter._json=self.metadata;self.reporter._upload=Mock()
+        with patch('partner_monitor.google_compact.replace_workbook') as replace:
+            with self.assertRaisesRegex(ValueError,'ручной проверки'):
+                self.reporter.sync([],[],[])
+            replace.assert_not_called()
+
+    def test_legacy_five_tab_report_can_migrate_to_review_tab(self):
+        from partner_monitor.google_compact import LEGACY_REPORT_SHEETS
+        def metadata(method,url,**kwargs):
+            value=self.metadata(method,url,**kwargs)
+            if 'sheets' in value:value['sheets']=[s for s in value['sheets'] if s['properties']['title'] in LEGACY_REPORT_SHEETS]
+            return value
+        self.reporter._json=metadata
+        self.assertEqual(len(verify_target(self.reporter)['sheets']),5)
 
     def test_losing_an_old_measurement_or_successful_picture_blocks_replacement(self):
         self.reporter._json = self.metadata

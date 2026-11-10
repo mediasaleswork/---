@@ -40,6 +40,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     book.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
     report = book.active
     report.title = "Отчёт"
+    manual_review = book.create_sheet('Ручная проверка')
     unavailable = book.create_sheet("Недоступные посты")
     detail = book.create_sheet("Реестр публикаций")
     history_sheet = book.create_sheet("История просмотров")
@@ -102,9 +103,9 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     archive_pending={(p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' and has_caption(j)}
     pending=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'pending','error'})+len(archive_pending)
     unknown={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' and not has_caption(j) }
-    review={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status') in {'review','offline_review'} }
+    review={ (p['id'],j['message_ids']) for p in partners for j in p.get('manual_reviews',p.get('campaign_checks',[])) if j.get('status','unavailable') not in {'match','no_match','obsolete','archived_no_match','unavailable'} }
     archived={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status')=='archived_no_match' }
-    queue_note=f"Ожидают распознавания: {pending}. Без сохранённого текста: {len(unknown)}. Архивная сверка: {len(archived)}. Нужна сверка: {len(review)} (см. «Недоступные посты»)." if any('campaign_queue' in p for p in partners) else ''
+    queue_note=f"Ожидают распознавания: {pending}. Без сохранённого текста: {len(unknown)}. Архивная сверка: {len(archived)}. Нужна сверка: {len(review)} (лист «Ручная проверка»)." if any('campaign_queue' in p for p in partners) else ''
     local_count=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'local_checked','offline_review'})
     local_mode=any(p.get('campaign_mode')=='local' for p in partners)
     if local_mode or local_count:
@@ -310,6 +311,8 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         unavailable.row_dimensions[row].height=78
         if info.get('text'):unavailable.cell(row,4).comment=Comment('Сохранённый текст публикации:\n'+info['text'][:12000],'Partner Monitor')
     _write_table(history_sheet, history)
+    from .review_queue import export_sheet as export_review
+    export_review(manual_review,partners,timezone)
     post_by_id = {p["id"]: p for p in filtered_posts}
     for row, snap in enumerate(_ordered(filtered_snapshots), 2):
         post = post_by_id[snap["post_id"]]

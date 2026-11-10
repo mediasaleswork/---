@@ -88,6 +88,13 @@ class Store(AbstractContextManager):
           id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
           provider TEXT NOT NULL, model TEXT NOT NULL, job_ids TEXT NOT NULL,
           campaign_mappings TEXT NOT NULL, status TEXT NOT NULL, error TEXT);
+        CREATE TABLE IF NOT EXISTS campaign_reviews (
+          job_id TEXT PRIMARY KEY REFERENCES campaign_checks(id), opened_at TEXT NOT NULL,
+          opened_reason TEXT NOT NULL,original_snapshot TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS campaign_review_events (
+          id INTEGER PRIMARY KEY,job_id TEXT NOT NULL REFERENCES campaign_checks(id),
+          recorded_at TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,decision TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS campaign_review_history ON campaign_review_events(job_id,id);
         CREATE TABLE IF NOT EXISTS source_revisions (
           source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, revision_hash TEXT NOT NULL,
           payload TEXT NOT NULL, recorded_at TEXT NOT NULL,
@@ -111,6 +118,10 @@ class Store(AbstractContextManager):
                 if name not in existing:
                     self.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
         self.execute("UPDATE campaign_checks SET individual_review=1 WHERE reason='individual_review' AND individual_review=0")
+        if not self.state('campaign_review_register_v1',''):
+            from .review_queue import reconcile
+            reconcile(self)
+            self.set_state('campaign_review_register_v1','1')
 
     def __exit__(self, *args):
         self.db.close()
@@ -206,6 +217,8 @@ class Store(AbstractContextManager):
     def dump(self) -> tuple[list[dict], list[dict], list[dict]]:
         partners = self.rows("SELECT * FROM partners ORDER BY id")
         for partner in partners:
+            from .review_queue import rows_for_partner
+            partner['manual_reviews']=rows_for_partner(self,partner['id'])
             partner["contract_plans"] = self.rows("SELECT * FROM contract_plans WHERE partner_id=? ORDER BY id", (partner["id"],))
             # Intake diagnostics travel through the existing report API without
             # changing its three-list signature. Only the first partner owns it.

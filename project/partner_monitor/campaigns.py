@@ -389,7 +389,7 @@ class CampaignWorker:
             return
         if self.store.state("campaign_quota_retry_at", "") > utcnow():
             return
-        for job in self.store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','local_checked','offline_review') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT ?",
+        for job in self.store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','local_checked','offline_review','review') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT ?",
                                    (utcnow(), self.config.campaign_batch_size)):
             partner_rows = self.store.rows("SELECT * FROM partners WHERE id=?", (job["partner_id"],))
             partner = partner_rows[0] if partner_rows else None
@@ -496,6 +496,10 @@ class CampaignWorker:
     def finish(self, job, status, reason, value=None):
         self.store.execute("UPDATE campaign_checks SET status=?,reason=?,decision=?,checked_at=? WHERE id=?",
                            (status, reason[:1500], packed(value) if value else None, utcnow(), job["id"]))
+        from .review_queue import observe,next_review_day
+        observe(self.store,job['id'],status,reason,value)
+        if status=='review':
+            self.store.execute("UPDATE campaign_checks SET next_try_at=?,provisional_decision='' WHERE id=?",(next_review_day(),job['id']))
         log.info("Распознавание %s: проверка %s, сообщения %s, результат %s",
                  self.config.campaign_provider, job["id"][:10], job["message_ids"], status)
         self.monitor.changed.set()

@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 def report_payload(partners, posts, snapshots, *, include_urls=True):
     def clean(value):
         if isinstance(value, dict):
-            omitted = {"intake", "last_message_id", "last_checked_at", "screenshot_path", "campaign_checks", "campaign_queue", "campaign_mode", "campaign_local_reason"}
+            omitted = {"intake", "last_message_id", "last_checked_at", "screenshot_path", "campaign_checks", "campaign_queue", "campaign_mode", "campaign_local_reason", "manual_reviews"}
             if not include_urls:
                 omitted.add("screenshot_url")
             return {key: clean(item) for key, item in value.items() if key not in omitted}
@@ -35,7 +35,8 @@ def archive_evidence(reporter, partners, posts, snapshots):
     """Upload every successful picture, then an immutable portable JSON ledger."""
     from .google_compact import verify_target, verify_history_preserved
     metadata = verify_target(reporter)
-    verify_history_preserved(reporter, posts, snapshots, metadata)
+    verify_history_preserved(reporter, posts, snapshots, metadata,
+        {r['id'] for p in partners for r in p.get('manual_reviews',[])})
     links = {}
     for snapshot in snapshots:
         url = reporter._upload(snapshot)

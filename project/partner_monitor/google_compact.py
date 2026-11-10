@@ -11,8 +11,9 @@ import tempfile
 from urllib.parse import urlsplit
 from PIL import Image
 
-REPORT_SHEETS = ("Отчёт", "Недоступные посты", "Реестр публикаций", "История просмотров", "Партнёры")
-HIDDEN_SHEETS = frozenset(REPORT_SHEETS[2:])
+LEGACY_REPORT_SHEETS = ("Отчёт", "Недоступные посты", "Реестр публикаций", "История просмотров", "Партнёры")
+REPORT_SHEETS = ("Отчёт", "Ручная проверка", "Недоступные посты", "Реестр публикаций", "История просмотров", "Партнёры")
+HIDDEN_SHEETS = frozenset(LEGACY_REPORT_SHEETS[2:])
 MARKER = "partner_monitor_compact"
 VALUE = "v1"
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -27,8 +28,8 @@ def verify_target(reporter):
     names = {s["properties"]["title"] for s in sheet.get("sheets", [])}
     owned = metadata.get("appProperties", {}).get(MARKER) == VALUE or any(
         m.get("metadataKey") == MARKER and m.get("metadataValue") == VALUE for m in sheet.get("developerMetadata", []))
-    if metadata.get("mimeType") != SHEETS or not owned or names != set(REPORT_SHEETS):
-        raise ValueError("Компактный отчёт: нужна отдельная копия шаблона с отметкой partner_monitor_compact=v1 и пятью листами образца")
+    if metadata.get("mimeType") != SHEETS or not owned or names not in (set(REPORT_SHEETS),set(LEGACY_REPORT_SHEETS)):
+        raise ValueError("Компактный отчёт: нужна отдельная отмеченная книга с известным составом листов; посторонние листы заменять нельзя")
     return sheet
 
 
@@ -43,16 +44,23 @@ def valid_picture(path):
         return False
 
 
-def verify_history_preserved(reporter, posts, snapshots, metadata=None):
+def verify_history_preserved(reporter, posts, snapshots, metadata=None,manual_review_ids=None):
     metadata = metadata or reporter._json("GET", f"https://sheets.googleapis.com/v4/spreadsheets/{reporter.spreadsheet_id}", params={"fields": "sheets.properties"})
     grids = {s["properties"]["title"]: s["properties"].get("gridProperties", {}).get("rowCount", 1000) for s in metadata["sheets"]}
+    check_reviews='Ручная проверка' in grids and manual_review_ids is not None
+    requested=[f"'Реестр публикаций'!D1:D{grids['Реестр публикаций']}", f"'История просмотров'!B1:H{grids['История просмотров']}"]
+    if check_reviews:requested.append(f"'Ручная проверка'!L1:L{grids['Ручная проверка']}")
     result = reporter._json("GET", f"https://sheets.googleapis.com/v4/spreadsheets/{reporter.spreadsheet_id}/values:batchGet", params={
-        "ranges": [f"'Реестр публикаций'!D1:D{grids['Реестр публикаций']}", f"'История просмотров'!B1:H{grids['История просмотров']}"],
+        "ranges": requested,
         "valueRenderOption": "UNFORMATTED_VALUE"})
     ranges = result.get("valueRanges", [])
-    if len(ranges) != 2:
+    if len(ranges) != len(requested):
         raise ValueError("Не удалось проверить сохранность существующего отчёта")
-    registry, history = (r.get("values", []) for r in ranges)
+    registry, history = (r.get("values", []) for r in ranges[:2])
+    if check_reviews:
+        reviews=ranges[2].get('values',[])
+        if not reviews or reviews[0]!=['ID проверки'] or not {r[0] for r in reviews[1:] if r and r[0]}.issubset(manual_review_ids):
+            raise ValueError('Защита истории: потеряны записи ручной проверки; таблица не изменена')
     if not registry or registry[0] != ["Ссылка на пост"] or not history or len(history[0]) < 5 or history[0][0] != "Ссылка на пост" or history[0][4] != "Контрольная точка":
         raise ValueError("Неизвестные заголовки истории; замена отчёта запрещена")
     old_posts = {r[0] for r in registry[1:] if r and r[0]}
@@ -109,7 +117,8 @@ def restore_pictures(reporter, snapshots, scratch):
 
 def sync_compact(reporter, partners, posts, snapshots):
     metadata = verify_target(reporter)
-    protected = verify_history_preserved(reporter, posts, snapshots, metadata)
+    protected = verify_history_preserved(reporter, posts, snapshots, metadata,
+        {r['id'] for p in partners for r in p.get('manual_reviews',[])})
     from .unified_report import export_unified
     from .report_view import build_view
     copies = [dict(s) for s in snapshots]

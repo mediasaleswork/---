@@ -41,7 +41,7 @@ class ReportTests(unittest.TestCase):
         path = export_xlsx(self.partners, self.posts, self.snapshots, self.root / "out.xlsx", month="2026-11")
         book = load_workbook(path)
         self.addCleanup(book.close)
-        self.assertEqual(book.sheetnames, ["Отчёт", "Недоступные посты", "Реестр публикаций", "История просмотров", "Партнёры"])
+        self.assertEqual(book.sheetnames, ["Отчёт", "Ручная проверка", "Недоступные посты", "Реестр публикаций", "История просмотров", "Партнёры"])
         registry = book["Реестр публикаций"]
         columns = {cell.value: cell.column for cell in registry[1]}
         self.assertEqual(registry.max_row, 3)  # 31 October UTC is already 1 November in Tashkent.

@@ -27,6 +27,8 @@ def current(worker,job):
 
 def maintain_queue(worker):
     store=worker.store
+    from .review_queue import reconcile
+    reconcile(store)
     if not store.state('campaign_local_rules_v2',''):
         store.execute("UPDATE campaign_checks SET status='pending',next_try_at=? WHERE status IN ('local_checked','offline_review')",(utcnow(),))
         store.set_state('campaign_local_rules_v2',utcnow())
@@ -40,7 +42,7 @@ def maintain_queue(worker):
         store.execute("UPDATE campaign_checks SET status='unavailable',next_try_at=? WHERE status='review' AND reason='Публикация недоступна; совпадение не засчитано'",(utcnow(),))
         store.set_state('campaign_unavailable_retry_v1',utcnow())
     groups={}
-    for job in store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match','local_checked','offline_review') ORDER BY created_at DESC"):
+    for job in store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match','local_checked','offline_review','review') ORDER BY created_at DESC"):
         partner,placements=current(worker,job)
         if not partner:
             worker.finish(job,'obsolete','Настройки, материал или область наблюдения изменились')
@@ -70,6 +72,8 @@ def settle_placements(worker):
 
 def save_status(worker):
     store=worker.store
+    from .review_queue import reconcile
+    reconcile(store)
     data={'checked_at':utcnow(),'counts':store.rows('SELECT status,COUNT(*) AS n FROM campaign_checks GROUP BY status'),
         'oldest_pending':store.rows("SELECT MIN(created_at) AS created_at FROM campaign_checks WHERE status IN ('pending','error')"),
         'unavailable':store.rows("SELECT p.username,j.message_ids,j.status,j.reason,j.availability_attempts,j.next_try_at FROM campaign_checks j JOIN partners p ON p.id=j.partner_id WHERE j.status IN ('unavailable','archived_no_match')"),
@@ -142,7 +146,7 @@ async def process_batch(worker):
             store.set_state('campaign_local_reason',offline)
             ai_ready=not offline and store.state('campaign_next_request_at','')<=now
             statuses="'pending','error','unavailable','archived_no_match'"
-            if ai_ready:statuses+=",'local_checked','offline_review'"
+            if ai_ready:statuses+=",'local_checked','offline_review','review'"
             due="j.next_try_at<=?"
             if offline:
                 # A provider retry deadline must not hold back a local check.

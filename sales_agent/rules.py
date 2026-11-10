@@ -35,9 +35,10 @@ HYPOTHESES = {
 }
 
 AD_MARKER=re.compile(r'\(\s*(?:реклама|на\s+правах\s+рекламы|reklama|advertisement)\s*\)|(?<!\w)#(?:реклама|reklama|ad)\b|(?<!\w)(?:реклама|на\s+правах\s+рекламы|reklama|advertisement)\s*[.!]?\s*$',re.I)
-AD_NAME=re.compile(r"[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,5}")
+AD_NAME=re.compile(r"(?<!\w)[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,5}")
 AD_STOP={'IT','HR','EIOS','III','II','I','IV','V','VI','VII','VIII','IX','X','Batafsil','Reklama','Telegram','Instagram','Facebook','Sayt','The','Today',
-    'KUNDAN','SO‘NG','BIRINCHI','ANIQLANADI','JAMI','SOVG‘A','Chimyonda','Dam'}
+    'KUNDAN','SO‘NG','BIRINCHI','ANIQLANADI','JAMI','SOVG‘A','Chimyonda','Dam',
+    'BIR','KUN','KATTA','IMKONIYATLAR','FOYDALI','XARIDLAR','Kutgan','Markaziy','Global'}
 
 
 def is_advertisement(text):
@@ -49,9 +50,9 @@ def advertising_brand(text,known):
     organiser=re.search(r'(?i:организован\w*|организатор\w*)\s+(?P<name>'+LATIN+r')',text)
     if organiser:
         return organiser.group('name'),organiser.start('name'),organiser.end('name')
-    aliases=['Yandex','Wuling','ASUS','HUMO','NBU','Click','MKBANK','ASLZAR','Kia','Uztelecom']
+    aliases=['Yandex','Wuling','ASUS','HUMO','NBU','Click','MKBANK','ASLZAR','Kia','Uztelecom','MEDIAPARK','payme','Mastercard']
     for pattern in aliases:
-        match=re.search(r'(?<!\w)'+pattern+r'(?=$|\W|(?:ga|dan|ning|ni|da)\b)',text[:1500])
+        match=re.search(r'(?<!\w)'+pattern+r'(?=$|\W|(?:ga|dan|ning|ni|da)\b)',text[:1500],re.I)
         if match:return text[match.start():match.end()],match.start(),match.end()
     # In awards stories the recipient, rather than the payment network, is the prospect.
     recipient=re.search(r'(?i:отметил\w*)\s+(?P<name>'+LATIN+r')\s+(?i:наград\w*)',text)

@@ -170,6 +170,19 @@ class SalesTests(unittest.TestCase):
         self.assertEqual(found[0]['company'],'Octobank')
         self.assertIsNotNone(validate(found[0],{source['id']:source},NOW))
 
+    def test_slogans_and_parts_of_product_names_do_not_become_companies(self):
+        examples=[
+            ('BIR KUN. KATTA IMKONIYATLAR. FOYDALI XARIDLAR! Kutgan xaridingizni amalga oshiring: MEDIAPARK’da keng turdagi texnikalar va katta chegirmalar! #реклама','MEDIAPARK'),
+            ('Ваш iPhone это ваша карта Mastercard. Загрузите карту Mastercard в Apple Wallet и оплачивайте ей покупки. На правах рекламы','Mastercard'),
+            ('Қаланыздағы саудаңызды payme go арқалы TezQR менен төлең ҳәм кешбек алың. Қосымшада payme go ашың. #реклама','payme')]
+        for text,company in examples:
+            source=dict(self.source,text=text,title=text[:180])
+            found=RuleResearcher().classify([source],NOW)
+            self.assertEqual(len(found),1,text)
+            self.assertEqual(found[0]['company'],company)
+        text='Регистрация на Copernicus Olympiad открыта. Участники получат приглашение на Global Round в США. На правах рекламы'
+        self.assertFalse(RuleResearcher().classify([dict(self.source,text=text,title=text)],NOW))
+
     def test_advertiser_is_not_a_location_product_or_research_title(self):
         examples=[
             ('2 KUNDAN SO‘NG BIRINCHI G‘OLIBLAR ANIQLANADI! ASLZAR’dan uy va avtomobil yutib olish imkoniyati tobora yaqinlashmoqda! #реклама','ASLZAR',()),

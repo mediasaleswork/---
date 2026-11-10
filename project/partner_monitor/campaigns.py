@@ -197,20 +197,27 @@ class GeminiCampaignJudge:
         return self.request(content,PROMPT,SCHEMA,4000)
 
     def compare_many(self,content,job_ids):
+        labels={ident:'p'+str(i+1) for i,ident in enumerate(job_ids)}
+        original={label:ident for ident,label in labels.items()}
+        prepared=[]
+        for part in content:
+            if part['type']=='input_text' and part['text'].startswith('PUBLICATION '):
+                value=json.loads(part['text'][12:]);value['job_id']=labels[value['job_id']]
+                part={**part,'text':'PUBLICATION '+packed(value)}
+            prepared.append(part)
         item={'type':'object','additionalProperties':False,
-            'properties':{'job_id':{'type':'string','enum':list(job_ids)},**SCHEMA['properties']},
+            'properties':{'job_id':{'type':'string'},**SCHEMA['properties']},
             'required':['job_id',*SCHEMA['required']]}
-        schema={'type':'object','additionalProperties':False,'properties':{'results':{'type':'array',
-            'minItems':len(job_ids),'maxItems':len(job_ids),'items':item}},'required':['results']}
+        schema={'type':'object','additionalProperties':False,'properties':{'results':{'type':'array','items':item}},'required':['results']}
         prompt=PROMPT+'\nThere are several INDEPENDENT PUBLICATION blocks, each with job_id. Compare each ONLY against the REFERENCE blocks, never against other publications. Return exactly one result for each job_id. Do not transfer a matching detail or an image from one publication to another. Keep each reason under 180 characters.'
-        value=self.request(content,prompt,schema,8192)
+        value=self.request(prepared,prompt,schema,8192)
         if not isinstance(value,dict) or set(value)!={'results'} or not isinstance(value['results'],list):
             raise CampaignAPIError('invalid_batch_response')
         results={}
         for row in value['results']:
-            if not isinstance(row,dict) or set(row)!={'job_id',*SCHEMA['required']} or row['job_id'] not in job_ids or row['job_id'] in results:
+            if not isinstance(row,dict) or set(row)!={'job_id',*SCHEMA['required']} or row['job_id'] not in original or original[row['job_id']] in results:
                 raise CampaignAPIError('invalid_batch_response')
-            results[row['job_id']]={k:v for k,v in row.items() if k!='job_id'}
+            results[original[row['job_id']]]={k:v for k,v in row.items() if k!='job_id'}
         if set(results)!=set(job_ids):raise CampaignAPIError('incomplete_batch_response')
         return results
 
@@ -236,6 +243,11 @@ class GeminiCampaignJudge:
             with requests.post("https://generativelanguage.googleapis.com/v1beta/models/" + self.model + ":generateContent", json=body,
                     headers={"x-goog-api-key": key}, timeout=(10, 60), allow_redirects=False) as response:
                 if response.status_code != 200:
+                    if response.status_code==400:
+                        try:message=response.json().get('error',{}).get('message','').casefold()
+                        except (ValueError,AttributeError,TypeError):message=''
+                        category=next((label for label,words in [('schema',('schema','states','complex','constraint')),('image',('image','jpeg','png')),('tokens',('token','size','length'))] if any(word in message for word in words)),'input')
+                        raise CampaignAPIError('http_400_'+category)
                     raise CampaignAPIError(f"http_{response.status_code}")
                 result = response.json()
             candidates = result.get("candidates", []) if isinstance(result, dict) else []

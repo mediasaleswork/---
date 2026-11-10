@@ -6,6 +6,7 @@ explicit audit result; unavailable posts retry separately from the ready queue.
 import asyncio
 from datetime import datetime,timedelta,timezone
 import json
+import logging
 
 from telethon import types
 from .campaigns import (CampaignAPIError,MAX_CAMPAIGNS,packed,source_signature,
@@ -34,6 +35,9 @@ def current(worker,job):
 
 def maintain_queue(worker):
     store=worker.store
+    if not store.state('campaign_batch_labels_v2',''):
+        store.execute("UPDATE campaign_checks SET next_try_at=? WHERE status='error' AND reason LIKE 'http_400%'",(utcnow(),))
+        store.set_state('campaign_batch_labels_v2',utcnow())
     if not store.state('campaign_unavailable_retry_v1',''):
         store.execute("UPDATE campaign_checks SET status='unavailable',next_try_at=? WHERE status='review' AND reason='Публикация недоступна; совпадение не засчитано'",(utcnow(),))
         store.set_state('campaign_unavailable_retry_v1',utcnow())
@@ -87,11 +91,13 @@ def budget(worker):
     return used<worker.config.campaign_daily_limit and (not worker.config.campaign_total_limit or total<worker.config.campaign_total_limit)
 
 
-def defer(worker,jobs,code,attempted=False):
+def defer(worker,jobs,code):
     if code=='http_429':
         retry=(datetime.now(timezone.utc)+timedelta(minutes=15)).isoformat()
         worker.store.set_state('campaign_quota_retry_at',retry)
+    elif code.startswith('http_400'):retry=(datetime.now(timezone.utc)+timedelta(seconds=15)).isoformat()
     else:retry=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()
+    logging.getLogger(__name__).warning('Пакет распознавания отложен: %s, публикаций %s',code,len(jobs))
     for job in jobs:
         worker.store.execute("UPDATE campaign_checks SET status='error',reason=?,next_try_at=? WHERE id=?",(code,retry,job['id']))
     worker.monitor.changed.set()
@@ -110,8 +116,9 @@ async def process_batch(worker):
             # Every fourth request starts with the newest candidate, including
             # an image-only post. Other requests steadily drain the backlog.
             anchor=max(jobs,key=lambda j:j['created_at']) if turn%4==0 else jobs[0]
+            size=max(1,GROUP_SIZE//2**min(anchor['attempts'],3)) if anchor['reason'].startswith('http_400') else GROUP_SIZE
             group=[anchor]+[j for j in jobs if j['id']!=anchor['id'] and j['partner_id']==anchor['partner_id']
-                and j['placement_ids']==anchor['placement_ids'] and j['source_signature']==anchor['source_signature']][:GROUP_SIZE-1]
+                and j['placement_ids']==anchor['placement_ids'] and j['source_signature']==anchor['source_signature']][:size-1]
             partner,placements=current(worker,anchor)
             if not partner:continue
             if len(placements)>MAX_CAMPAIGNS:
@@ -131,10 +138,12 @@ async def process_batch(worker):
                 ids=sorted({mid for j in group for mid in json.loads(j['message_ids'])})
                 fetched=await worker.monitor.client.get_messages(entity,ids=ids)
                 messages_by_id={m.id:m for m in fetched if isinstance(m,types.Message)}
+                missing=set()
                 for job in group:
                     messages=[messages_by_id[mid] for mid in json.loads(job['message_ids']) if mid in messages_by_id]
                     if len(messages)!=len(json.loads(job['message_ids'])):
-                        unavailable(worker,job);continue
+                        if job['message_ids'] not in missing:unavailable(worker,job)
+                        missing.add(job['message_ids']);continue
                     if candidate_signature(messages)!=job['candidate_signature']:
                         worker.finish(job,'obsolete','Публикация отредактирована; проверим новую версию')
                         enqueue(store,worker.config,partner,messages,placements);continue

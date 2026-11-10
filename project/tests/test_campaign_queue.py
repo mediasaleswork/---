@@ -104,6 +104,17 @@ class QueueTests(IsolatedAsyncioTestCase):
 
 
 class BatchProtocolTests(TestCase):
+    def test_short_labels_keep_schema_small_and_results_map_to_exact_jobs(self):
+        judge=GeminiCampaignJudge('test')
+        identifiers=['a'*64,'b'*64]
+        content=[{'type':'input_text','text':'PUBLICATION '+json.dumps({'job_id':i,'text':'данные'})} for i in identifiers]
+        response={'results':[dict(cases.decision(),job_id='p2'),dict(cases.decision(),job_id='p1')]}
+        with patch.object(judge,'request',return_value=response) as request:
+            result=judge.compare_many(content,identifiers)
+        self.assertEqual(set(result),set(identifiers))
+        self.assertNotIn('a'*64,json.dumps(request.call_args.args[0]))
+        self.assertNotIn('enum',request.call_args.args[2]['properties']['results']['items']['properties']['job_id'])
+
     def test_duplicate_or_missing_job_ids_are_not_accepted(self):
         judge=GeminiCampaignJudge('test')
         for value in ({'results':[]},{'results':[dict(cases.decision(),job_id='a'),dict(cases.decision(),job_id='a')]},

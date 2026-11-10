@@ -40,6 +40,12 @@ class EventClient(FakeClient):
 
 
 class RealtimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_alternative_username_can_register_realtime_updates(self):
+        entity=channel();entity.username=None;entity.usernames=[SimpleNamespace(username='partner_one',active=True)]
+        entity.left=True;entity.access_hash=123
+        partner=self.store.rows('SELECT * FROM partners')[0]
+        self.live.register_channel(partner,entity)
+        self.assertIn(200,self.live.tasks)
     async def asyncSetUp(self):
         await fixtures.MonitorTests.asyncSetUp(self)
         self.config = replace(self.config, keywords=[], domains=[])

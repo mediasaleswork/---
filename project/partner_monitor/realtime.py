@@ -67,8 +67,9 @@ class Realtime:
         return False
 
     def register_channel(self, partner, entity):
+        from .channel_folder import public_username
         # Joined channels already have passive updates; don't spend a lease.
-        if self.closed or not entity.username or not entity.left or not self.watching(partner["id"]):
+        if self.closed or not public_username(entity) or not entity.left or not self.watching(partner["id"]):
             return
         if entity.id in self.tasks and not self.tasks[entity.id].done():
             return

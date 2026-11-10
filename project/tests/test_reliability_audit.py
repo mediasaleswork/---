@@ -318,3 +318,21 @@ class SourceEditTests(unittest.IsolatedAsyncioTestCase):
         await refresh_source_materials(monitor,client.group)
         self.assertEqual(self.store.rows('SELECT source_text FROM placements')[0]['source_text'],source.message)
         self.assertEqual(len(self.store.rows('SELECT * FROM source_revisions')),1)
+
+    async def test_source_recheck_pages_past_one_hundred_messages_without_losing_old_material(self):
+        from partner_monitor.reconciliation import refresh_source_materials
+        source=engine.message(1,'Старый рекламный материал',peer=100)
+        source.fwd_from=SimpleNamespace(from_id=None);self.consume(source)
+        messages=[source]
+        for mid in range(2,121):
+            item=engine.message(mid,'Обычная переписка команды '+str(mid),peer=100)
+            self.consume(item);messages.append(item)
+        source.message='Исправленный старый рекламный материал'
+        client=engine.FakeClient(messages)
+        monitor=Monitor(self.config,self.store,client,engine.FakeCapture());monitor.source_peer_id=-1000000000100
+        await refresh_source_materials(monitor,client.group)
+        self.assertEqual(self.store.rows('SELECT source_text FROM placements')[0]['source_text'],source.message)
+        self.assertEqual(json.loads(self.store.state('source_material_recheck_cycle'))['cursor'],100)
+        await refresh_source_materials(monitor,client.group)
+        self.assertEqual(self.store.state('source_material_recheck_cycle'),'{}')
+        self.assertEqual(len(self.store.rows('SELECT * FROM source_messages')),120)

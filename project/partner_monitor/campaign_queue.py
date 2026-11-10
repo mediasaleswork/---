@@ -3,22 +3,13 @@
 No news is discarded by a keyword heuristic. Obsolete/duplicate jobs retain an
 explicit audit result; unavailable posts retry separately from the ready queue.
 """
-import asyncio
 from datetime import datetime,timedelta,timezone
 import json
 import logging
 
-from telethon import types
-from .campaigns import (CampaignAPIError,MAX_CAMPAIGNS,packed,source_signature,
-    model_identity,candidate_signature,enqueue,validate_decision)
-from .fallback import offline_match
-from .message_content import combined_content
+from .campaigns import packed,source_signature,model_identity
 from .parsing import PartnerReference
 from .storage import utcnow
-
-GROUP_SIZE=8
-MAX_PAYLOAD=12*1024*1024
-
 
 def current(worker,job):
     partners=worker.store.rows('SELECT * FROM partners WHERE id=?',(job['partner_id'],))
@@ -93,8 +84,8 @@ def unavailable(worker,job,archived=False):
     retry=(datetime.now(timezone.utc)+timedelta(minutes=delay)).isoformat()
     worker.store.execute("""UPDATE campaign_checks SET status=?,reason=?,
         availability_attempts=availability_attempts+1,next_try_at=?,checked_at=?
-        WHERE partner_id=? AND message_ids=? AND status IN ('pending','error','review','unavailable','archived_no_match')""",
-        ('archived_no_match' if archived else 'unavailable',job['reason'] if archived else 'Telegram не вернул публикацию; удаление не подтверждено. Повторная проверка запланирована.',retry,utcnow(),job['partner_id'],job['message_ids']))
+        WHERE id=? AND status IN ('pending','error','review','unavailable','archived_no_match')""",
+        ('archived_no_match' if archived else 'unavailable',job['reason'] if archived else 'Telegram не вернул публикацию; удаление не подтверждено. Повторная проверка запланирована.',retry,utcnow(),job['id']))
     worker.monitor.changed.set()
 
 
@@ -106,148 +97,61 @@ def budget(worker):
 
 
 def defer(worker,jobs,code):
+    hint=getattr(code,'retry_after',None)
+    code=str(code)
+    now=datetime.now(timezone.utc)
     if code in {'request_timeout','network_unavailable','http_500','http_502','http_503','http_504'}:
         failures=int(worker.store.state('campaign_service_failures'))+1
         worker.store.set_state('campaign_service_failures',failures)
-        pause=min(300,30*2**min(failures-1,4))
-        worker.store.set_state('campaign_service_retry_at',(datetime.now(timezone.utc)+timedelta(seconds=pause)).isoformat())
+        pause=max(hint or 0,min(300,30*2**min(failures-1,4)))
+        retry=(now+timedelta(seconds=pause)).isoformat()
+        worker.store.set_state('campaign_service_retry_at',retry)
     if code=='http_429':
-        retry=(datetime.now(timezone.utc)+timedelta(minutes=15)).isoformat()
+        failures=int(worker.store.state('campaign_quota_failures'))+1
+        worker.store.set_state('campaign_quota_failures',failures)
+        pause=max(hint or 0,min(900,60*2**min(failures-1,4)))
+        retry=(now+timedelta(seconds=pause)).isoformat()
         worker.store.set_state('campaign_quota_retry_at',retry)
-    elif code.startswith('http_400'):retry=(datetime.now(timezone.utc)+timedelta(seconds=15)).isoformat()
-    else:retry=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()
+    elif code.startswith('http_400'):retry=(now+timedelta(seconds=30)).isoformat()
+    elif code not in {'request_timeout','network_unavailable','http_500','http_502','http_503','http_504'}:
+        retry=(now+timedelta(seconds=60)).isoformat()
     logging.getLogger(__name__).warning('Пакет распознавания отложен: %s, публикаций %s',code,len(jobs))
     for job in jobs:
-        worker.store.execute("UPDATE campaign_checks SET status='error',reason=?,next_try_at=? WHERE id=?",(code,retry,job['id']))
+        count=worker.store.rows('SELECT attempts FROM campaign_checks WHERE id=?',(job['id'],))[0]['attempts']
+        if count>=3 and code in {'invalid_batch_response','incomplete_batch_response','incomplete_or_blocked_response','model_refusal'}:
+            worker.finish(job,'review','После повторной сверки ответ распознавания неполон; требуется проверка: '+code)
+        else:
+            worker.store.execute("UPDATE campaign_checks SET status='error',reason=?,next_try_at=? WHERE id=?",(code,retry,job['id']))
     worker.monitor.changed.set()
 
 
 async def process_batch(worker):
+    from .campaign_batching import choose_group,process_group
+    from .archived_checks import caption_payload
     store=worker.store
     try:
         for _ in range(worker.config.campaign_batch_size):
             now=utcnow()
-            ai_ready=store.state('campaign_quota_retry_at','')<=now and store.state('campaign_service_retry_at','')<=now and store.state('campaign_next_request_at','')<=now and budget(worker)
-            jobs=store.rows("""SELECT j.* FROM campaign_checks j JOIN partners p ON p.id=j.partner_id
-              WHERE p.status='active' AND j.status IN ('pending','error','unavailable','archived_no_match')
-              AND j.next_try_at<=? ORDER BY j.priority DESC,j.created_at,j.id LIMIT 1000""",(now,))
+            ai_ready=(store.state('campaign_quota_retry_at','')<=now
+                and store.state('campaign_service_retry_at','')<=now
+                and store.state('campaign_next_request_at','')<=now and budget(worker))
+            where="p.status='active' AND j.status IN ('pending','error','unavailable','archived_no_match') AND j.next_try_at<=?"
+            sql='SELECT j.* FROM campaign_checks j JOIN partners p ON p.id=j.partner_id WHERE '+where
+            jobs=store.rows(sql+' ORDER BY j.priority DESC,j.created_at,j.id LIMIT 1000',(now,))
+            # Include global oldest/newest even when >1000 high-priority jobs
+            # would otherwise hide them from the bounded working set.
+            for order in ('j.created_at,j.id','j.created_at DESC,j.id DESC'):
+                for job in store.rows(sql+' ORDER BY '+order+' LIMIT 1',(now,)):
+                    if not any(j['id']==job['id'] for j in jobs):jobs.append(job)
             if not ai_ready:
-                from .archived_checks import caption_payload
-                jobs=[j for j in jobs if j['status']=='archived_no_match' or j['status']=='unavailable' and not caption_payload(j)]
+                jobs=[j for j in jobs if j.get('provisional_decision') or j['status']=='archived_no_match'
+                    or j['status']=='unavailable' and not caption_payload(j)]
             if not jobs:return
-            turn=int(store.state('campaign_queue_turn'));store.set_state('campaign_queue_turn',turn+1)
-            # Every fourth request starts with the newest candidate, including
-            # an image-only post. Other requests steadily drain the backlog.
-            anchor=max(jobs,key=lambda j:j['created_at']) if turn%4==0 else jobs[0]
-            size=1 if anchor['reason']=='individual_review' else max(1,GROUP_SIZE//2**min(anchor['attempts'],3)) if anchor['reason'].startswith('http_400') else GROUP_SIZE
-            group=[anchor]+[j for j in jobs if j['id']!=anchor['id'] and j['partner_id']==anchor['partner_id']
-                and j['placement_ids']==anchor['placement_ids'] and j['source_signature']==anchor['source_signature']][:size-1]
-            partner,placements=current(worker,anchor)
-            if not partner:continue
-            if len(placements)>MAX_CAMPAIGNS:
-                for job in group:worker.finish(job,'review','Слишком много одновременно подходящих кампаний; уточните материал')
-                continue
-            if getattr(worker.judge,'key_variable',None):
-                import os
-                if not os.environ.get(worker.judge.key_variable,'').strip():
-                    for job in group:store.execute("UPDATE campaign_checks SET reason='missing_api_key' WHERE id=?",(job['id'],))
-                    return
-            ready=[]
-            try:
-                entity=await worker.monitor.client.get_entity(partner['username'] or types.PeerChannel(partner['private_channel_id']))
-                if entity.id!=partner['channel_id']:
-                    for job in group:worker.finish(job,'obsolete','Канал изменился; нужна проверка')
-                    continue
-                ids=sorted({mid for j in group for mid in json.loads(j['message_ids'])})
-                fetched=await worker.monitor.client.get_messages(entity,ids=ids)
-                messages_by_id={m.id:m for m in fetched if isinstance(m,types.Message)}
-                missing=set()
-                for job in group:
-                    messages=[messages_by_id[mid] for mid in json.loads(job['message_ids']) if mid in messages_by_id]
-                    if len(messages)!=len(json.loads(job['message_ids'])):
-                        if job['message_ids'] not in missing:
-                            from .archived_checks import check_saved_caption
-                            outcome=await check_saved_caption(worker,job,partner,placements,entity,ai_ready)
-                            if outcome in ('requested','waiting'):return
-                            if outcome!='cached':unavailable(worker,job)
-                        missing.add(job['message_ids']);continue
-                    if candidate_signature(messages)!=job['candidate_signature']:
-                        worker.finish(job,'obsolete','Публикация отредактирована; проверим новую версию')
-                        enqueue(store,worker.config,partner,messages,placements);continue
-                    recorded=store.rows('SELECT message_ids FROM posts WHERE partner_id=?',(partner['id'],))
-                    if any(set(m.id for m in messages)&set(json.loads(p['message_ids'])) for p in recorded):
-                        worker.finish(job,'obsolete','Публикация уже учтена');continue
-                    actual=combined_content(messages)
-                    if job['status'] in ('unavailable','archived_no_match'):store.execute("UPDATE campaign_checks SET status='pending',reason='' WHERE id=?",(job['id'],))
-                    snapshot=packed({'text':actual.text,'urls':actual.urls,'media':actual.media,
-                        'published_at':messages[0].date.isoformat(),'views':getattr(messages[0],'views',None)})
-                    store.execute('UPDATE campaign_checks SET candidate_snapshot=? WHERE id=?',(snapshot,job['id']))
-                    exact=[p for p in placements if offline_match(messages,p).matched]
-                    if len(exact)==1:
-                        pid=await worker.monitor.record_post(partner,entity,messages,'offline:совпадает согласованный материал',exact)
-                        store.execute('UPDATE campaign_checks SET post_id=? WHERE id=?',(pid,job['id']))
-                        worker.finish(job,'match','Совпадает согласованный материал без обращения к ИИ');continue
-                    ready.append((job,messages,actual))
-                if not ready:continue
-                if not ai_ready:return
-                content=[]
-                for p in placements:
-                    content.append({'type':'input_text','text':'REFERENCE '+packed({'campaign_id':p['id'],
-                        'client':p['client_name'],'advertisement':p['name'],'text':p['source_text'][:16000]})})
-                    content.extend(await worker.reference_images(p))
-                selected=[]
-                for job,messages,actual in ready:
-                    parts=[{'type':'input_text','text':'PUBLICATION '+packed({'job_id':job['id'],'text':actual.text[:16000],'urls':actual.urls})}]
-                    parts.extend(await worker.images(messages))
-                    if sum(len(p.get('image_url','')) for p in content+parts)>MAX_PAYLOAD:
-                        if not selected:raise CampaignAPIError('image_too_large')
-                        break
-                    content.extend(parts);selected.append((job,messages,actual))
-                ready=selected
-                if not ready:continue
-                day=datetime.now(timezone.utc).date().isoformat()
-                store.set_state('campaign_api_attempts:'+day,int(store.state('campaign_api_attempts:'+day))+1)
-                store.set_state('campaign_api_attempts_total',int(store.state('campaign_api_attempts_total'))+1)
-                store.set_state('campaign_next_request_at',(datetime.now(timezone.utc)+timedelta(seconds=10)).isoformat())
-                for job,_,_ in ready:store.execute('UPDATE campaign_checks SET attempts=attempts+1 WHERE id=?',(job['id'],))
-                if len(ready)==1 and ready[0][0]['reason']=='individual_review' and callable(getattr(type(worker.judge),'compare',None)):
-                    values={ready[0][0]['id']:await asyncio.to_thread(worker.judge.compare,content)}
-                else:
-                    values=await asyncio.to_thread(worker.judge.compare_many,content,[j['id'] for j,_,_ in ready])
-                if not isinstance(values,dict) or set(values)!={j['id'] for j,_,_ in ready}:raise CampaignAPIError('incomplete_batch_response')
-                # Validate the whole response before committing ANY verdict.
-                verdicts={key:validate_decision(value,[p['id'] for p in placements]) for key,value in values.items()}
-                store.set_state('campaign_service_failures',0)
-                store.set_state('campaign_service_retry_at','')
-                refreshed=await worker.monitor.client.get_messages(entity,ids=ids)
-                by_id={m.id:m for m in refreshed if isinstance(m,types.Message)}
-                if not getattr(worker.monitor,'scope_ready',True):
-                    return
-                for job,previous,_ in ready:
-                    _,latest=current(worker,job)
-                    if not latest:
-                        worker.finish(job,'obsolete','Материал изменился во время проверки');continue
-                    if store.rows('SELECT status FROM partners WHERE id=?',(job['partner_id'],))[0]['status']!='active':
-                        continue  # Preserve the job if channel access changed during the request.
-                    messages=[by_id[mid] for mid in json.loads(job['message_ids']) if mid in by_id]
-                    if len(messages)!=len(previous):unavailable(worker,job);continue
-                    if candidate_signature(messages)!=job['candidate_signature']:
-                        worker.finish(job,'obsolete','Публикация изменилась во время распознавания')
-                        enqueue(store,worker.config,partner,messages,latest);continue
-                    value=values[job['id']];status=verdicts[job['id']]
-                    if status=='match':
-                        chosen=next(p for p in latest if p['id']==value['campaign_id'])
-                        post_id=await worker.monitor.record_post(partner,entity,messages,'campaign: '+value['reason'][:700],[chosen])
-                        store.execute('UPDATE campaign_checks SET post_id=? WHERE id=?',(post_id,job['id']))
-                    worker.finish(job,status,value['reason'],value)
-                    if status=='review' and job['reason']!='individual_review' and job['attempts']<3:
-                        store.execute("UPDATE campaign_checks SET status='error',reason='individual_review',next_try_at=? WHERE id=?",(utcnow(),job['id']))
-            except CampaignAPIError as exc:
-                defer(worker,[j for j,_,_ in ready] or group,str(exc))
-                return
-            except ValueError:
-                defer(worker,[j for j,_,_ in ready] or group,'invalid_batch_response')
-                return
+            turn=int(store.state('campaign_queue_turn'))
+            group=choose_group(worker,jobs,turn)
+            if not group:return
+            store.set_state('campaign_queue_turn',turn+1)
+            if not await process_group(worker,group,ai_ready):return
     finally:
         settle_placements(worker)
         save_status(worker)

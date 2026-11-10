@@ -59,6 +59,29 @@ def combined_content(messages) -> Content:
                    tuple(dict.fromkeys(m for v in values for m in v.media)))
 
 
+def visual_sources(message):
+    """Actual photo/thumbnail objects, including referenced rich-message media."""
+    ordinary={}
+    for kind in ('photo','document'):
+        media=getattr(message,kind,None)
+        if media and getattr(media,'id',None):
+            ordinary[f'{kind}:{media.id}']=(message,kind=='photo' or bool(getattr(media,'thumbs',None)))
+    rich=getattr(message,'rich_message',None)
+    objects={}
+    for kind,field in (('photo','photos'),('document','documents')):
+        for media in getattr(rich,field,[]) or []:
+            objects[f'{kind}:{media.id}']=media
+    for key in message_content(message).media:
+        if key in ordinary:
+            target,visible=ordinary[key]
+            if visible:yield key,target
+        elif key.startswith('photo:'):
+            yield key,objects.get(key)
+        else:
+            target=objects.get(key)
+            if target and getattr(target,'thumbs',None):yield key,target
+
+
 def search_text(messages) -> str:
     content = combined_content(messages)
     return content.text + "\n" + "\n".join(content.urls)

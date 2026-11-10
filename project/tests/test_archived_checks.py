@@ -56,6 +56,27 @@ class ArchivedTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'pending')
         self.assertFalse(self.store.rows('SELECT * FROM posts'))
 
+    async def test_archival_response_survives_failed_telegram_refresh_without_another_ai_call(self):
+        await self.prepare_archive()
+        original=self.client.get_messages
+        fail=False
+        async def get_messages(entity,ids):
+            if fail:raise OSError('Telegram disconnected after inference')
+            return await original(entity,ids)
+        self.client.get_messages=get_messages
+        def answer(content):
+            nonlocal fail
+            fail=True
+            return base.decision(None,'different_campaign')
+        with patch.object(queue.BatchJudge,'compare_archived',create=True,side_effect=answer) as compare:
+            with self.assertRaises(OSError):await self.monitor.campaign_worker.process()
+            self.assertTrue(self.store.rows('SELECT provisional_decision FROM campaign_checks')[0]['provisional_decision'])
+            fail=False
+            self.store.set_state('campaign_quota_retry_at',(NOW+timedelta(days=1)).isoformat())
+            await self.monitor.campaign_worker.process()
+            self.assertEqual(compare.call_count,1)
+        self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'archived_no_match')
+
     async def test_archived_rejection_is_not_sent_again_on_each_availability_retry(self):
         await self.prepare_archive()
         with patch.object(queue.BatchJudge,'compare_archived',create=True,return_value=base.decision(None,'different_campaign')) as compare:

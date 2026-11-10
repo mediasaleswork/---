@@ -13,8 +13,8 @@ import os
 from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageOps
-from telethon import types
 from .capture import CaptureResult
+from .message_content import message_content,visual_sources
 
 
 class BoundedMedia(io.BytesIO):
@@ -43,9 +43,11 @@ def card_html(title, messages, pictures, snapshot, url, timezone):
     for message in messages:
         picture = pictures.get(message.id)
         if picture:
-            blocks.append('<img alt="Медиа публикации" src="' + picture + '">')
-        if message.message:
-            blocks.append('<div class="text">' + html.escape(message.message) + '</div>')
+            for value in ([picture] if isinstance(picture,str) else picture):
+                blocks.append('<img alt="Медиа публикации" src="' + value + '">')
+        text=message_content(message).text
+        if text:
+            blocks.append('<div class="text">' + html.escape(text) + '</div>')
         if getattr(message, "document", None):
             blocks.append('<div class="muted">Вложение Telegram; показана миниатюра, если доступна</div>')
         blocks.append('<div class="mid">Сообщение №' + str(message.id) + '</div>')
@@ -66,17 +68,19 @@ async def capture_private_card(capture, client, partner, messages, snapshot, url
         return CaptureResult(None, "failed", "Рендер карточки не запущен")
     page = None
     temporary = None
+    slots=getattr(capture,'_slots',None)
+    if slots:await slots.acquire()
     try:
         async with asyncio.timeout(90):
             pictures = {}
             for message in messages:
-                photo, document = getattr(message, "photo", None), getattr(message, "document", None)
-                if photo or document and getattr(document, "thumbs", None):
+                for _,target in visual_sources(message):
+                    if target is None:raise ValueError('private_photo_unavailable')
                     with BoundedMedia() as buffer:
-                        await client.download_media(message, file=buffer, thumb=-1)
+                        await client.download_media(target, file=buffer, thumb=-1)
                         if buffer.getvalue():
-                            pictures[message.id] = await asyncio.to_thread(inline_picture, buffer.getvalue())
-                        elif photo:
+                            pictures.setdefault(message.id,[]).append(await asyncio.to_thread(inline_picture, buffer.getvalue()))
+                        else:
                             raise ValueError("private_photo_unavailable")
             markup = card_html(partner["title"], messages, pictures, snapshot, url, timezone)
             page = await capture._context.new_page()
@@ -99,7 +103,12 @@ async def capture_private_card(capture, client, partner, messages, snapshot, url
     except Exception as exc:
         return CaptureResult(None, "failed", f"Карточка закрытого поста не получена ({type(exc).__name__})")
     finally:
-        if page:
-            await page.close()
-        if temporary:
-            temporary.unlink(missing_ok=True)
+        try:
+            if page:
+                try:await page.close()
+                except Exception:pass
+            if temporary:
+                try:temporary.unlink(missing_ok=True)
+                except OSError:pass
+        finally:
+            if slots:slots.release()

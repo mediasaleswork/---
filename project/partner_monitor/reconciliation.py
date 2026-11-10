@@ -11,10 +11,17 @@ async def refresh_source_materials(monitor,entity):
         return
     store=monitor.store;now=datetime.now(timezone.utc)
     pending=json.loads(store.state('source_edited_ids','[]'))
-    if not pending and store.state('source_material_recheck_at','')>now.isoformat():
+    due=store.state('source_material_recheck_at','')<=now.isoformat()
+    if not pending and not due:
         return
     chat=str(monitor.source_peer_id)
-    rows=store.rows('SELECT message_id FROM source_messages WHERE source_chat_id=? ORDER BY message_id DESC LIMIT 100',(chat,))
+    cycle=json.loads(store.state('source_material_recheck_cycle','{}'))
+    if due and not cycle:
+        upper=store.rows('SELECT MAX(message_id) mid FROM source_messages WHERE source_chat_id=?',(chat,))[0]['mid'] or 0
+        cycle={'cursor':0,'upper':upper}
+    cutoff=(now-timedelta(days=monitor.config.default_window_days)).isoformat()
+    rows=store.rows('SELECT message_id FROM source_messages WHERE source_chat_id=? AND message_id>? AND message_id<=? AND received_at>=? ORDER BY message_id LIMIT 100',
+        (chat,cycle.get('cursor',0),cycle.get('upper',0),cutoff)) if due else []
     pending_known=[mid for mid in pending if store.rows('SELECT message_id FROM source_messages WHERE source_chat_id=? AND message_id=?',(chat,mid))]
     ids=list(dict.fromkeys(pending_known+[r['message_id'] for r in rows]))[:100]
     if ids:
@@ -32,7 +39,15 @@ async def refresh_source_materials(monitor,entity):
             seen.add(anchor.id)
             intake.refresh_forwarded(chat,anchor,combined_content(members))
         store.set_state('source_edited_ids',json.dumps([mid for mid in pending_known if mid not in received]))
-    store.set_state('source_material_recheck_at',(now+timedelta(minutes=15)).isoformat())
+        processed=[r['message_id'] for r in rows if r['message_id'] in ids]
+        if processed:
+            cycle['cursor']=max(processed)
+    if due:
+        if len(rows)<100 or cycle.get('cursor',0)>=cycle.get('upper',0):
+            store.set_state('source_material_recheck_cycle','{}')
+            store.set_state('source_material_recheck_at',(now+timedelta(minutes=15)).isoformat())
+        else:
+            store.set_state('source_material_recheck_cycle',json.dumps(cycle))
 
 
 async def reconcile_channel(monitor, partner, entity):

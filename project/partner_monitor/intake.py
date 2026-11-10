@@ -12,7 +12,7 @@ import logging
 import re
 
 from .briefs import Brief, _fields, parse_brief
-from .parsing import PartnerReference, _normalize
+from .parsing import _normalize
 from .storage import utcnow
 from .scope import target_key, target_reference
 log = logging.getLogger(__name__)
@@ -111,6 +111,7 @@ class ConversationIntake:
               keywords=excluded.keywords,domains=excluded.domains,
               media_keys=excluded.media_keys,client_name=excluded.client_name,language=excluded.language,
               status=CASE WHEN placements.status='found' AND excluded.status='watching' THEN 'found' ELSE excluded.status END,
+              scan_complete=0,
               review_reason=excluded.review_reason,
               direct_ids=excluded.direct_ids,draft_id=excluded.draft_id,contract_key=excluded.contract_key""",
               (pid, draft["source_chat_id"], draft["anchor_id"], text, draft["name"],

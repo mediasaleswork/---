@@ -381,7 +381,6 @@ class Monitor:
                     seen.add(key)
                     members = await self.album(entity, message)
                     published = members[0].date
-                    text = search_text(members)
                     if self.config.campaign_matching:
                         await self.queue_campaign(partner, members, placements)
                     for placement in ([] if self.config.campaign_matching else searches):
@@ -448,12 +447,10 @@ class Monitor:
             now = datetime.now(timezone.utc)
             placements = self.store.rows("""SELECT p.* FROM placements p JOIN placement_posts x ON x.placement_id=p.id
               WHERE x.post_id=? AND p.retention_hours IS NOT NULL AND p.status!='dismissed'""", (post["id"],))
-            retention_active = False
             for placement in placements:
                 until = datetime.fromisoformat(post["published_at"]) + timedelta(hours=placement["retention_hours"])
                 key = f"placement-{placement['id']}-{placement['retention_hours']:g}h"
                 if datetime.fromisoformat(post["first_seen_at"]) < until and not any(s["due_key"] == key for s in existing):
-                    retention_active = True
                     if until <= now and datetime.fromisoformat(post["first_seen_at"]) < until:
                         due.append((key, until.isoformat()))
             retries = [s for s in existing if not s["screenshot_path"] and (not s.get('next_capture_at') or s['next_capture_at']<=utcnow()) and s["id"] not in self._attempted and s["id"] not in self._capturing]

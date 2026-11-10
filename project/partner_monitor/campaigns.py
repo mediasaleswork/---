@@ -17,9 +17,9 @@ import re
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 import requests
-from telethon import types
+from telethon import errors,types
 
-from .message_content import combined_content
+from .message_content import combined_content,visual_sources
 from .parsing import PartnerReference
 from .storage import utcnow
 
@@ -155,6 +155,9 @@ def validate_decision(value, campaign_ids):
 
 class CampaignAPIError(Exception):
     """Safe error code only: never retain HTTP bodies/keys in logs or SQLite."""
+    def __init__(self, code, retry_after=None):
+        super().__init__(code)
+        self.retry_after = retry_after
 
 
 class OpenAICampaignJudge:
@@ -223,7 +226,7 @@ No archived same_campaign result will be automatically counted as a placement.''
             'required':['job_id',*SCHEMA['required']]}
         schema={'type':'object','additionalProperties':False,'properties':{'results':{'type':'array','items':item}},'required':['results']}
         prompt=PROMPT+'\nThere are several INDEPENDENT PUBLICATION blocks, each with job_id. Compare each ONLY against the REFERENCE blocks, never against other publications. Return exactly one result for each job_id. Do not transfer a matching detail or an image from one publication to another. Keep each reason under 180 characters.'
-        value=self.request(prepared,prompt,schema,8192)
+        value=self.request(prepared,prompt,schema,min(8192,max(2048,1024*len(job_ids))))
         if not isinstance(value,dict) or set(value)!={'results'} or not isinstance(value['results'],list):
             raise CampaignAPIError('invalid_batch_response')
         results={}
@@ -254,14 +257,15 @@ No archived same_campaign result will be automatically counted as a placement.''
                     "responseMimeType": "application/json", "responseJsonSchema": schema}}
         try:
             with requests.post("https://generativelanguage.googleapis.com/v1beta/models/" + self.model + ":generateContent", json=body,
-                    headers={"x-goog-api-key": key}, timeout=(10, 60), allow_redirects=False) as response:
+                    headers={"x-goog-api-key": key}, timeout=(10, 90), allow_redirects=False) as response:
                 if response.status_code != 200:
                     if response.status_code==400:
                         try:message=response.json().get('error',{}).get('message','').casefold()
                         except (ValueError,AttributeError,TypeError):message=''
                         category=next((label for label,words in [('schema',('schema','states','complex','constraint')),('image',('image','jpeg','png')),('tokens',('token','size','length'))] if any(word in message for word in words)),'input')
                         raise CampaignAPIError('http_400_'+category)
-                    raise CampaignAPIError(f"http_{response.status_code}")
+                    from .campaign_runtime import retry_hint
+                    raise CampaignAPIError(f"http_{response.status_code}", retry_hint(response))
                 result = response.json()
             candidates = result.get("candidates", []) if isinstance(result, dict) else []
             if len(candidates) != 1 or candidates[0].get("finishReason") != "STOP":
@@ -307,22 +311,18 @@ class CampaignWorker:
         self.judge = judge or factory(self.config.campaign_model)
         self.lock = asyncio.Lock()
         self.reference_cache={}
+        self.candidate_cache={}
 
     async def images(self, messages):
         result = []
         for message in messages:
-            if len(result) == 2:
-                break
-            photo, document = getattr(message, "photo", None), getattr(message, "document", None)
-            # Video thumbnails are supporting evidence, not video understanding.
-            if not photo and not (document and getattr(document, "thumbs", None)):
-                continue
-            with LimitedBuffer() as buffer:
-                await self.monitor.client.download_media(message, file=buffer, thumb=-1)
-                if buffer.getvalue():
-                    result.append(await asyncio.to_thread(image_input, buffer.getvalue()))
-                else:
-                    raise CampaignAPIError('media_unavailable')
+            for _,target in visual_sources(message):
+                if len(result)==2:return result
+                if target is None:raise CampaignAPIError('media_unavailable')
+                with LimitedBuffer() as buffer:
+                    await self.monitor.client.download_media(target,file=buffer,thumb=-1)
+                    if not buffer.getvalue():raise CampaignAPIError('media_unavailable')
+                    result.append(await asyncio.to_thread(image_input,buffer.getvalue()))
         return result
 
     async def reference_images(self, placement):
@@ -331,6 +331,12 @@ class CampaignWorker:
             return []
         key=digest([placement['source_chat_id'],placement['source_message_id'],placement.get('draft_id'),sorted(expected)])
         if key in self.reference_cache:return self.reference_cache[key]
+        from .campaign_runtime import read_reference_cache,write_reference_cache
+        cached=await asyncio.to_thread(read_reference_cache,self,key)
+        if cached is not None:
+            if len(self.reference_cache)>=32 or sum(len(p.get('image_url','')) for parts in self.reference_cache.values() for p in parts)>16*1024*1024:self.reference_cache.clear()
+            self.reference_cache[key]=cached
+            return cached
         # Later image corrections belong to the latest media revision, not
         # necessarily to the draft's first/anchor message.
         rows = self.store.rows("SELECT message_id,media_keys FROM source_messages WHERE draft_id=? ORDER BY message_id DESC",
@@ -344,9 +350,20 @@ class CampaignWorker:
         if not expected.intersection(combined_content(members).media):
             raise CampaignAPIError("reference_media_changed")
         result=await self.images(members)
-        if len(self.reference_cache)>=64:self.reference_cache.clear()
+        if len(self.reference_cache)>=32 or sum(len(p.get('image_url','')) for parts in self.reference_cache.values() for p in parts)>16*1024*1024:self.reference_cache.clear()
         self.reference_cache[key]=result
+        await asyncio.to_thread(write_reference_cache,self,key,result)
         return result
+
+    async def candidate_images(self,messages):
+        peer=getattr(messages[0].peer_id,'channel_id',None)
+        key=digest([peer,candidate_signature(messages)])
+        if key in self.candidate_cache:return self.candidate_cache[key]
+        parts=await self.images(messages)
+        if len(self.candidate_cache)>=32 or sum(len(p.get('image_url','')) for values in self.candidate_cache.values() for p in values)>16*1024*1024:
+            self.candidate_cache.clear()
+        self.candidate_cache[key]=parts
+        return parts
 
     async def process(self):
         # One request at a time across history/live callbacks; daily attempts
@@ -360,7 +377,12 @@ class CampaignWorker:
         from .campaign_queue import maintain_queue,process_batch
         maintain_queue(self)
         from .archived_checks import recover_forwarded_captions
-        await recover_forwarded_captions(self)
+        try:
+            await recover_forwarded_captions(self)
+        except errors.FloodWaitError:
+            raise
+        except (OSError,asyncio.TimeoutError,ValueError,errors.RPCError) as exc:
+            log.warning('Поиск сохранённой пересылки отложен (%s); очередь каналов продолжается',type(exc).__name__)
         if callable(getattr(type(self.judge),'compare_many',None)):
             await process_batch(self)
             return

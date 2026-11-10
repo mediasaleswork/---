@@ -82,5 +82,5 @@ def read_scope(data):
         normalized.append(p)
     return dict(conversation_mode=data.get("conversation_mode", False),
                 test_mode=data.get("test_mode", False), default_client=default_client,
-                allowed_channels=tuple(dict.fromkeys(channel_ref(v).username for v in allowed)),
+                allowed_channels=tuple(dict.fromkeys(v if re.fullmatch(r'c:[1-9][0-9]{0,18}',v) else channel_ref(v).username for v in allowed)),
                 channel_plans=tuple(normalized), data_namespace=namespace)

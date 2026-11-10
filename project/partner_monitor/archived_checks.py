@@ -70,7 +70,7 @@ async def recover_forwarded_captions(worker):
 
 async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
     from .campaign_queue import current,unavailable
-    refreshed=worker.store.rows('SELECT candidate_snapshot,archive_signature FROM campaign_checks WHERE id=?',(job['id'],))
+    refreshed=worker.store.rows('SELECT candidate_snapshot,archive_signature,provisional_decision FROM campaign_checks WHERE id=?',(job['id'],))
     if refreshed:job={**job,**refreshed[0]}
     value=saved_caption(job,partner)
     if not value or not callable(getattr(type(worker.judge),'compare_archived',None)):return None
@@ -79,7 +79,13 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
     if job.get('archive_signature')==signature and job['status']=='archived_no_match':
         unavailable(worker,job,archived=True)
         return 'cached'
-    if not ai_ready:return 'waiting'
+    try:cached=json.loads(job.get('provisional_decision') or '{}')
+    except (ValueError,TypeError):cached={}
+    decision=cached.get('result') if isinstance(cached,dict) and cached.get('archive_signature')==signature else None
+    if decision is not None:
+        try:validate_decision(decision,[p['id'] for p in placements])
+        except ValueError:decision=None
+    if decision is None and not ai_ready:return 'waiting'
     content=[]
     for p in placements:
         content.append({'type':'input_text','text':'REFERENCE '+packed({'campaign_id':p['id'],
@@ -89,15 +95,23 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
         'urls':value.get('urls',[]),'historical_caption':True,'publication_visuals_available':False,
         'published_at':value['published_at'],'archive_checked_at':value.get('archive_checked_at')})})
     if sum(len(part.get('image_url','')) for part in content)>12*1024*1024:raise CampaignAPIError('image_too_large')
-    store=worker.store;day=datetime.now(timezone.utc).date().isoformat()
-    store.set_state('campaign_api_attempts:'+day,int(store.state('campaign_api_attempts:'+day))+1)
-    store.set_state('campaign_api_attempts_total',int(store.state('campaign_api_attempts_total'))+1)
-    store.set_state('campaign_next_request_at',(datetime.now(timezone.utc)+timedelta(seconds=10)).isoformat())
-    store.execute('UPDATE campaign_checks SET attempts=attempts+1 WHERE id=?',(job['id'],))
-    decision=await asyncio.to_thread(worker.judge.compare_archived,content)
+    store=worker.store
+    if decision is None:
+        from .campaign_runtime import reserve_request,finish_request
+        request_id=reserve_request(worker,[job])
+        try:
+            decision=await asyncio.to_thread(worker.judge.compare_archived,content)
+            validate_decision(decision,[p['id'] for p in placements])
+        except CampaignAPIError as exc:
+            finish_request(worker,request_id,exc)
+            raise
+        except (ValueError,TypeError):
+            finish_request(worker,request_id,'invalid_batch_response')
+            raise CampaignAPIError('invalid_batch_response') from None
+        store.execute('UPDATE campaign_checks SET provisional_decision=?,provisional_at=? WHERE id=?',
+            (packed({'archive_signature':signature,'result':decision}),utcnow(),job['id']))
+        finish_request(worker,request_id)
     result=validate_decision(decision,[p['id'] for p in placements])
-    store.set_state('campaign_service_failures',0)
-    store.set_state('campaign_service_retry_at','')
     if not getattr(worker.monitor,'scope_ready',True):
         return 'requested'
     _,latest=current(worker,job)

@@ -84,6 +84,10 @@ class Store(AbstractContextManager):
           next_try_at TEXT NOT NULL, created_at TEXT NOT NULL, checked_at TEXT,
           reason TEXT NOT NULL DEFAULT '', decision TEXT, post_id INTEGER REFERENCES posts(id));
         CREATE INDEX IF NOT EXISTS campaign_pending ON campaign_checks(status,next_try_at);
+        CREATE TABLE IF NOT EXISTS campaign_requests (
+          id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
+          provider TEXT NOT NULL, model TEXT NOT NULL, job_ids TEXT NOT NULL,
+          campaign_mappings TEXT NOT NULL, status TEXT NOT NULL, error TEXT);
         CREATE TABLE IF NOT EXISTS source_revisions (
           source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, revision_hash TEXT NOT NULL,
           payload TEXT NOT NULL, recorded_at TEXT NOT NULL,
@@ -100,12 +104,13 @@ class Store(AbstractContextManager):
             "posts": {"last_checked_at": "TEXT", "unavailable_since": "TEXT"},
             "snapshots": {"next_capture_at": "TEXT"},
             "contract_plans": {"baseline_until": "TEXT"},
-            "campaign_checks": {"priority": "INTEGER NOT NULL DEFAULT 0", "availability_attempts": "INTEGER NOT NULL DEFAULT 0", "candidate_snapshot": "TEXT NOT NULL DEFAULT ''", "archive_signature": "TEXT NOT NULL DEFAULT ''"},
+            "campaign_checks": {"priority": "INTEGER NOT NULL DEFAULT 0", "availability_attempts": "INTEGER NOT NULL DEFAULT 0", "candidate_snapshot": "TEXT NOT NULL DEFAULT ''", "archive_signature": "TEXT NOT NULL DEFAULT ''", "provisional_decision": "TEXT NOT NULL DEFAULT ''", "provisional_at": "TEXT", "individual_review": "INTEGER NOT NULL DEFAULT 0"},
         }.items():
             existing = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
             for name, declaration in additions.items():
                 if name not in existing:
                     self.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        self.execute("UPDATE campaign_checks SET individual_review=1 WHERE reason='individual_review' AND individual_review=0")
 
     def __exit__(self, *args):
         self.db.close()

@@ -71,6 +71,7 @@ class Screenshotter:
         self._playwright = None
         self._browser = None
         self._context = None
+        self._slots = asyncio.Semaphore(2)
 
     async def __aenter__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -161,6 +162,7 @@ class Screenshotter:
         name = f"{username.lower()}_{ids[0]}_{digest}.png"
         final = self.output_dir / name
         page = None
+        await self._slots.acquire()
         try:
             # A total deadline also bounds multi-widget albums and stalled media.
             async with asyncio.timeout((self.timeout_ms / 1000 + 7) * len(ids)):
@@ -202,5 +204,9 @@ class Screenshotter:
             # expose the class, not raw exception text, in persisted reports.
             return CaptureResult(None, "failed", f"Capture failed ({type(exc).__name__})")
         finally:
-            if page:
-                await page.close()
+            try:
+                if page:
+                    try:await page.close()
+                    except Exception:pass  # A closed browser must not discard an already saved PNG.
+            finally:
+                self._slots.release()

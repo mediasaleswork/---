@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import quote
+from urllib.parse import quote,urlsplit
 
 from google.auth import load_credentials_from_file
 from google.auth.transport.requests import AuthorizedSession
@@ -12,6 +12,7 @@ LEAD_HEADERS = ["ID", "Компания", "Ниша", "Приоритет", "П�
 SCRIPT_HEADERS = ["ID", "Компания", "Первое сообщение", "Повторное касание", "Сценарий звонка", "Ответы на возражения"]
 HEALTH_HEADERS = ["Источник", "Проверено UTC", "Статус", "Результат"]
 RUN_HEADERS = ["Начало UTC", "Завершение UTC", "Статус", "Публикаций в периоде", "Новых лидов", "Результат"]
+PUBLICATION_HEADERS=['Компания','Дата публикации (Ташкент)','Площадка','Факт / цитата','Ссылка на публикацию','ID компании']
 
 
 def datevalue(value,tz_name='UTC'):
@@ -55,11 +56,48 @@ class Sheets:
             raise ValueError("Workbook headers changed; no cells were written")
         return meta
 
+    def publication_sheet(self,meta):
+        sh=next((s for s in meta.get('sheets',[]) if s['properties']['title']=='Публикации'),None)
+        if not sh:
+            response=self.api('POST',':batchUpdate',json={'requests':[{'addSheet':{'properties':{'title':'Публикации','gridProperties':{'rowCount':5000,'columnCount':6,'frozenRowCount':1}}}}]})
+            sh={'properties':response['replies'][0]['addSheet']['properties']}
+            sid=sh['properties']['sheetId']
+            requests=[{'updateCells':{'range':{'sheetId':sid,'startRowIndex':0,'endRowIndex':1,'startColumnIndex':0,'endColumnIndex':6},'rows':[{'values':[{'userEnteredValue':{'stringValue':v}} for v in PUBLICATION_HEADERS]}],'fields':'userEnteredValue'}},
+                {'updateDimensionProperties':{'range':{'sheetId':sid,'dimension':'ROWS','startIndex':0,'endIndex':1},'properties':{'pixelSize':44},'fields':'pixelSize'}},
+                {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':0,'endRowIndex':1,'startColumnIndex':0,'endColumnIndex':6},'cell':{'userEnteredFormat':{'backgroundColor':{'red':.93,'green':.93,'blue':.93},'textFormat':{'bold':True,'fontSize':11,'fontFamily':'Arial'},'wrapStrategy':'WRAP'}},'fields':'userEnteredFormat'}}]
+            for i,width in enumerate([190,205,180,500,320,155]):
+                requests.append({'updateDimensionProperties':{'range':{'sheetId':sid,'dimension':'COLUMNS','startIndex':i,'endIndex':i+1},'properties':{'pixelSize':width},'fields':'pixelSize'}})
+            self.api('POST',':batchUpdate',json={'requests':requests})
+        return sh
+
     def sync(self, store):
         meta = self.verify() or {}
         writes = []
         leads = self.read("Лиды", "A1:Q5000")
         scripts = self.read("Скрипты", "A1:F5000")
+        versions=store.publications()
+        latest={l['id']:l for l in store.leads()}
+        # A newer source refreshes the publication fields, while team-owned K:O stays intact.
+        for index,row in enumerate(leads[1:],start=2):
+            if not row or row[0] not in latest or len(row)<9:continue
+            lead=latest[row[0]]
+            old=next((v for v in versions if v['id']==row[0] and v['source_url']==row[8]),None)
+            if old and row[8]!=lead['source_url']:
+                current=(row+['']*17)[:17];target=lead_row(lead,self.timezone)
+                previous=lead_row(old,self.timezone)
+                block=current[4:10]
+                for column in range(4,10):
+                    if column in (5,8) or current[column]==previous[column]:block[column-4]=target[column]
+                writes.append({'range':f"'Лиды'!E{index}:J{index}",'values':[block]})
+                writes.append({'range':f"'Лиды'!P{index}:Q{index}",'values':[[target[15],target[16]]]})
+        for index,row in enumerate(scripts[1:],start=2):
+            if not row or row[0] not in latest:continue
+            for column,key in enumerate(['first','followup','call','objections'],start=2):
+                value=row[column] if len(row)>column else ''
+                target=latest[row[0]]['scripts'][key]
+                if value!=target and any(value==v.get('scripts',{}).get(key) for v in versions if v['id']==row[0]):
+                    letter=chr(65+column)
+                    writes.append({'range':f"'Скрипты'!{letter}{index}",'values':[[target]]})
         # Key by stable ID, never by row order. Existing rows and manual edits stay intact.
         existing = {str(r[0]) for r in leads[1:] if r}
         existing_scripts = {str(r[0]) for r in scripts[1:] if r}
@@ -73,6 +111,26 @@ class Sheets:
         if new_scripts:
             writes.append({"range":f"'Скрипты'!A{len(scripts)+1}:F{len(scripts)+len(new_scripts)}", "values":new_scripts})
         structure = []
+        if meta.get('sheets'):
+            publication_sheet=self.publication_sheet(meta)
+            sid=publication_sheet['properties']['sheetId']
+            posted=self.read('Публикации','A1:F5000')
+            if not posted or posted[0]!=PUBLICATION_HEADERS:raise ValueError('Publication headers changed')
+            published_keys={(r[5],r[4]) for r in posted[1:] if len(r)>=6}
+            additions=[]
+            for v in versions:
+                if (v['id'],v['source_url']) in published_keys:continue
+                url=urlsplit(v['source_url']);platform='@'+url.path.strip('/').split('/')[0] if url.hostname=='t.me' else url.hostname
+                additions.append([v['company'],datevalue(v['published'],self.timezone),platform,v['evidence_quote'],v['source_url'],v['id']])
+            if len(posted)+len(additions)>=5000:raise ValueError('Publication capacity reached')
+            if additions:
+                end=len(posted)+len(additions)
+                writes.append({'range':f"'Публикации'!A{len(posted)+1}:F{end}",'values':additions})
+                structure.extend([
+                    {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':len(posted),'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':6},'cell':{'userEnteredFormat':{'wrapStrategy':'WRAP','verticalAlignment':'TOP','textFormat':{'fontFamily':'Arial','fontSize':11}}},'fields':'userEnteredFormat'}},
+                    {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':1,'endRowIndex':end,'startColumnIndex':1,'endColumnIndex':2},'cell':{'userEnteredFormat':{'numberFormat':{'type':'DATE_TIME','pattern':'dd.mm.yyyy hh:mm'}}},'fields':'userEnteredFormat.numberFormat'}},
+                    {'updateDimensionProperties':{'range':{'sheetId':sid,'dimension':'ROWS','startIndex':len(posted),'endIndex':end},'properties':{'pixelSize':100},'fields':'pixelSize'}},
+                    {'setBasicFilter':{'filter':{'range':{'sheetId':sid,'startRowIndex':0,'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':6}}}}])
         for sh in meta.get('sheets', []):
             name=sh['properties']['title']
             additions=new_leads if name=='Лиды' else new_scripts if name=='Скрипты' else []

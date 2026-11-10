@@ -136,7 +136,59 @@ class SalesTests(unittest.TestCase):
             repeat=cycle(self.cfg,self.store,now=NOW,collect_sources=False)
         self.assertEqual(result['new_leads'],1)
         self.assertEqual(repeat['new_leads'],0)
-        self.assertEqual(self.store.state('research_engine'),'rules-1')
+        self.assertEqual(self.store.state('research_engine'),'rules-2')
+
+    def test_marked_brand_ads_are_candidates_without_launch_keywords(self):
+        examples=[
+            ('Три года с Haval: бренд объединяет владельцев и любителей комфортных автомобилей по всему Узбекистану (реклама).','Haval'),
+            ('Как Semurg Insurance организовала страховые выплаты и обслуживание своих клиентов с помощью платформы EIOS (реклама).','Semurg Insurance'),
+            ('HUMO спорт, технологиялар ва замонавий санъатни бирлаштирди. Махсус ҳудудда тўлов ечимлари намойиш этилди. Реклама','HUMO'),
+            ('Wuling Bardosh — qulay shartlarda avtomobil xarid qiling. Boshlang‘ich to‘lov va muddatlar haqida batafsil. Reklama','Wuling'),
+            ('Central Asian University talabalar uchun xalqaro tibbiyot musobaqasini tashkil qildi, jamoalar ishtirok etdi. Reklama','Central Asian University')]
+        for text,company in examples:
+            source=dict(self.source,text=text,title=text[:180])
+            self.assertTrue(relevant(source))
+            found=RuleResearcher().classify([source],NOW)
+            self.assertEqual(len(found),1,text)
+            lead=validate(found[0],{source['id']:source},NOW)
+            self.assertIsNotNone(lead,text)
+            self.assertEqual(lead['company'],company)
+            self.assertEqual(lead['event_kind'],'рекламное размещение')
+
+    def test_anonymous_ads_and_news_about_advertising_are_not_invented_companies(self):
+        from sales_agent.rules import is_advertisement
+        text='Нужны деньги? Мы поможем оформить кредит под залог имущества. Подробности по телефону. #реклама'
+        self.assertFalse(RuleResearcher().classify([dict(self.source,text=text,title=text)],NOW))
+        self.assertFalse(is_advertisement('Реклама в Telegram становится популярной: компания рассказала о тенденциях рынка.'))
+
+    def test_repeat_brand_updates_latest_fact_and_keeps_every_post(self):
+        lead=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)
+        self.store.add_lead(lead);ident=lead['id']
+        later=dict(lead,published=(NOW+timedelta(days=1)).isoformat(),source_url='https://t.me/spotuz/124',evidence_quote=TEXT+' Новая публикация.')
+        self.assertFalse(self.store.add_lead(later))
+        self.assertEqual(self.store.leads()[0]['id'],ident)
+        self.assertEqual(self.store.leads()[0]['source_url'],later['source_url'])
+        self.assertEqual(len(self.store.publications()),2)
+        self.store.add_lead(lead)
+        self.assertEqual(len(self.store.publications()),2)
+        self.assertEqual(self.store.leads()[0]['source_url'],later['source_url'])
+
+    def test_latest_signal_preserves_team_columns_and_custom_script(self):
+        old=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)
+        self.store.add_lead(old)
+        new=dict(old,published=(NOW+timedelta(days=1)).isoformat(),source_url='https://t.me/spotuz/124',evidence_quote=TEXT+' Новое событие.',scripts=dict(old['scripts'],first='New generated script'))
+        self.store.add_lead(new)
+        row=lead_row(old);row[11]='Встреча';row[14]='Заметка команды'
+        class Fake(Sheets):
+            def __init__(self):self.writes=[];self.timezone='Asia/Tashkent'
+            def verify(self):return {}
+            def read(self,name,bounds):
+                return [LEAD_HEADERS,row] if name=='Лиды' else [SCRIPT_HEADERS,[old['id'],old['company'],'Custom team script',old['scripts']['followup'],old['scripts']['call'],old['scripts']['objections']]]
+            def api(self,method,path='',**kwargs):self.writes.append(kwargs['json']);return {}
+        sheet=Fake();sheet.sync(self.store)
+        writes=sheet.writes[-1]['data']
+        self.assertTrue(any(w['range']=="'Лиды'!E2:J2" and w['values'][0][4]==new['source_url'] for w in writes))
+        self.assertFalse(any("K2" in w['range'] or "O2" in w['range'] or "'Скрипты'!C2"==w['range'] for w in writes))
 
     def test_noncommercial_news_does_not_block_the_persistent_queue(self):
         self.store.add_source(dict(url='https://news.example/exchange',title='Курсы валют',

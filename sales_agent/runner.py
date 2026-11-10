@@ -19,12 +19,13 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
     run = store.db.execute("INSERT INTO runs(started,status) VALUES(?,?)", (stamp(), "running")).lastrowid
     store.db.commit()
     new_count, count, status, detail = 0, 0, "ok", ""
+    publications_before=store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]
     try:
-        if store.state('research_engine')!='rules-1':
+        if store.state('research_engine')!='rules-2':
             # Re-evaluate previously model-processed public stories once; keep all CRM rows.
             with store.db:
                 store.db.execute('UPDATE sources SET processed=0 WHERE published>=?',((now-timedelta(days=cfg.lookback_days)).isoformat(),))
-            store.set_state('research_engine','rules-1')
+            store.set_state('research_engine','rules-2')
         if collect_sources:
             count = collect(cfg, store, now)
             if not store.db.execute("SELECT 1 FROM source_health WHERE status='ok'").fetchone():
@@ -61,7 +62,8 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
             store.processed([r["id"] for r in batch if r["id"] not in overflow])
             if new_count >= cfg.max_leads:
                 break
-        detail = "Новых кандидатов нет; источники проверены по правилам" if not new_count else "По правилам найдены новые кандидаты; скрипты подготовлены из шаблонов. Перед обращением нужна проверка сигнала и CRM"
+        new_publications=store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]-publications_before
+        detail = "Новых компаний: "+str(new_count)+", публикаций: "+str(new_publications)+". История размещений — на листе «Публикации». Перед обращением нужна проверка CRM"
         if not queue:
             detail += "; в очереди нет свежих коммерческих сигналов"
     except Deferred as exc:
@@ -71,7 +73,7 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
     store.db.execute("UPDATE runs SET finished=?,status=?,sources=?,leads=?,detail=? WHERE id=?", (stamp(),status,count,new_count,detail,run))
     store.db.commit()
     store.set_state("last_researched", now.isoformat())
-    return {"status":status, "sources":count, "new_leads":new_count, "detail":detail}
+    return {"status":status, "sources":count, "new_leads":new_count, "new_publications":store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]-publications_before, "detail":detail}
 
 
 def due(store, cfg, now):

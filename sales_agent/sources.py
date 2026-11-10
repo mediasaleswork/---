@@ -123,5 +123,5 @@ def collect(cfg, store, now):
 
 
 def relevant(item):
-    from .rules import EVENTS
-    return any(pattern.search(item['text']) for _,pattern in EVENTS) and not NEGATIVE.search(item["title"])
+    from .rules import EVENTS,is_advertisement
+    return (is_advertisement(item['text']) or any(pattern.search(item['text']) for _,pattern in EVENTS)) and not NEGATIVE.search(item["title"])

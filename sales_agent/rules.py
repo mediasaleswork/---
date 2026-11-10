@@ -23,6 +23,7 @@ EXCLUDE = re.compile(r'^(?:IT Park|Центр технологий будуще�
 COMPETITOR = re.compile(r'(?:рекламн\w*|маркетингов\w*|PR)[\s-]*(?:агентств\w*)', re.I)
 TRAGEDY = re.compile(r'погиб|убийств|скончал|теракт|уголовн|похорон', re.I)
 HYPOTHESES = {
+    'рекламное размещение':'В источнике опубликован материал с рекламной пометкой. Возможно, компании нужны дополнительные площадки; бюджет, прямого заказчика и потребность необходимо уточнить.',
     'открытие':'Может быть полезно познакомить местную аудиторию с новой точкой или направлением.',
     'запуск':'Может быть актуально рассказать целевой аудитории о новом или обновлённом предложении.',
     'расширение':'Может быть полезна коммуникационная поддержка на новой территории или для новой аудитории.',
@@ -32,6 +33,38 @@ HYPOTHESES = {
     'мероприятие':'Возможно, организатору нужны охват и привлечение целевой аудитории.',
     'лицензирование':'Возможно, после получения лицензии компания готовит выход к клиентам; запуск и потребность ещё нужно уточнить.',
 }
+
+AD_MARKER=re.compile(r'\(\s*(?:реклама|reklama|advertisement)\s*\)|(?<!\w)#(?:реклама|reklama|ad)\b|(?<!\w)(?:реклама|reklama|advertisement)\s*[.!]?\s*$',re.I)
+AD_NAME=re.compile(r"[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,5}")
+AD_STOP={'IT','HR','EIOS','III','II','I','IV','V','VI','VII','VIII','IX','X','Batafsil','Reklama','Telegram','Instagram','Facebook','Sayt','The','Today'}
+
+
+def is_advertisement(text):
+    return bool(AD_MARKER.search(re.sub(r'https?://\S+','',text)[-500:]))
+
+
+def advertising_brand(text,known):
+    # An explicitly named organiser is preferable to the title of the advertised exhibition.
+    organiser=re.search(r'(?i:организован\w*|организатор\w*)\s+(?P<name>'+LATIN+r')',text)
+    if organiser:
+        return organiser.group('name'),organiser.start('name'),organiser.end('name')
+    aliases=[('Yandex','Yandex'),('Wuling','Wuling'),('ASUS','ASUS'),('HUMO','HUMO'),('NBU','NBU')]
+    for pattern,name in aliases:
+        match=re.search(r'(?<!\w)'+pattern+r'(?!\w)',text[:500])
+        if match:return text[match.start():match.end()],match.start(),match.end()
+    # Inspect the headline before names of interviewees, products and footer links.
+    candidates=[]
+    for match in AD_NAME.finditer(text[:240]):
+        name=match.group().strip()
+        if name in AD_STOP or EXCLUDE.search(name):continue
+        if re.search(r'\b(?:Expo|Marathon|Forum|Olympiad|Medicine of the Future)\b',name,re.I):continue
+        first=name.split()[0]
+        if first in AD_STOP:continue
+        if first.isupper() and len(first)>=3:
+            name=first
+        candidates.append((name,match.start(),match.start()+len(name)))
+    if candidates:return candidates[0]
+    return next(iter(brands(text,known)),None)
 
 
 def brands(text, known):
@@ -100,6 +133,18 @@ class RuleResearcher:
             text=source['text'][:5000]
             if TRAGEDY.search(source['title']) or COMPETITOR.search(text[:500]):
                 continue
+            if is_advertisement(text):
+                brand=advertising_brand(text,self.known)
+                if brand:
+                    company,start,end=brand
+                    anchor=re.search(re.escape(text[start:end]),text)
+                    quote=evidence(text,start,end,anchor)
+                    if quote:
+                        result.append(dict(source_id=source['id'],company=company,evidence_quote=quote,
+                            sector=sector(text),event_kind='рекламное размещение',service='Telegram и СМИ',
+                            hypothesis=HYPOTHESES['рекламное размещение'],priority='B',
+                            rationale='В публикации есть рекламная пометка и конкретный бренд. Контакт и актуальность предложения проверить.',confidence='средняя'))
+                        continue
             events=[(kind,m) for kind,pattern in EVENTS for m in pattern.finditer(text)]
             for company,start,end in brands(text,self.known):
                 if EXCLUDE.search(company): continue

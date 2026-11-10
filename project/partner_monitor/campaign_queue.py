@@ -113,7 +113,9 @@ async def process_batch(worker):
             now=utcnow()
             ai_ready=store.state('campaign_quota_retry_at','')<=now and store.state('campaign_next_request_at','')<=now and budget(worker)
             jobs=store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT 1000",(now,))
-            if not ai_ready:jobs=[j for j in jobs if j['status'] in ('unavailable','archived_no_match')]
+            if not ai_ready:
+                from .archived_checks import caption_payload
+                jobs=[j for j in jobs if j['status']=='archived_no_match' or j['status']=='unavailable' and not caption_payload(j)]
             if not jobs:return
             turn=int(store.state('campaign_queue_turn'));store.set_state('campaign_queue_turn',turn+1)
             # Every fourth request starts with the newest candidate, including
@@ -148,7 +150,7 @@ async def process_batch(worker):
                         if job['message_ids'] not in missing:
                             from .archived_checks import check_saved_caption
                             outcome=await check_saved_caption(worker,job,partner,placements,entity,ai_ready)
-                            if outcome=='requested':return
+                            if outcome in ('requested','waiting'):return
                             if outcome!='cached':unavailable(worker,job)
                         missing.add(job['message_ids']);continue
                     if candidate_signature(messages)!=job['candidate_signature']:

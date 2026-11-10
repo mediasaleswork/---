@@ -61,3 +61,17 @@ class ArchivedTests(IsolatedAsyncioTestCase):
         self.assertIsNotNone(saved_caption(job,partner))
         self.assertIsNone(saved_caption(dict(job,candidate_snapshot=json.dumps(dict(data,source_url='https://t.me/other/7'))),partner))
         self.assertIsNone(saved_caption(dict(job,candidate_snapshot=json.dumps(dict(data,published_at=(NOW+timedelta(days=100)).isoformat()))),partner))
+
+    async def test_api_spacing_does_not_delay_preserved_caption_by_hours(self):
+        await self.prepare_archive()
+        self.store.execute("UPDATE campaign_checks SET status='unavailable',next_try_at='2000-01-01T00:00:00+00:00'")
+        self.store.set_state('campaign_next_request_at',(NOW+timedelta(hours=1)).isoformat())
+        with patch.object(queue.BatchJudge,'compare_archived',create=True,return_value=base.decision(None,'different_campaign')) as compare:
+            await self.monitor.campaign_worker.process()
+            row=self.store.rows('SELECT * FROM campaign_checks')[0]
+            self.assertEqual(row['next_try_at'],'2000-01-01T00:00:00+00:00')
+            self.assertEqual(row['availability_attempts'],0)
+            compare.assert_not_called()
+            self.store.set_state('campaign_next_request_at','')
+            await self.monitor.campaign_worker.process()
+        self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'archived_no_match')

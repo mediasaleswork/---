@@ -11,10 +11,16 @@ from .campaigns import packed,digest,validate_decision,enqueue,source_signature,
 from .storage import utcnow
 
 
-def saved_caption(job,partner):
+def caption_payload(job):
     try:value=json.loads(job.get('candidate_snapshot') or '{}')
     except (ValueError,TypeError):return None
     if not isinstance(value,dict) or not isinstance(value.get('text'),str) or len(value['text'].strip())<40:return None
+    return value
+
+
+def saved_caption(job,partner):
+    value=caption_payload(job)
+    if not value:return None
     expected=f"https://t.me/{partner['username']}/{min(json.loads(job['message_ids']))}" if partner.get('username') else None
     if value.get('source_url') and value['source_url'].casefold()!=(expected or '').casefold():return None
     try:published=datetime.fromisoformat(value['published_at'])
@@ -26,6 +32,8 @@ def saved_caption(job,partner):
 
 async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
     from .campaign_queue import current,unavailable
+    refreshed=worker.store.rows('SELECT candidate_snapshot,archive_signature FROM campaign_checks WHERE id=?',(job['id'],))
+    if refreshed:job={**job,**refreshed[0]}
     value=saved_caption(job,partner)
     if not value or not callable(getattr(type(worker.judge),'compare_archived',None)):return None
     if not any(datetime.fromisoformat(p['starts_at'])<=datetime.fromisoformat(value['published_at'])<datetime.fromisoformat(p['ends_at']) for p in placements):return None
@@ -33,7 +41,7 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
     if job.get('archive_signature')==signature and job['status']=='archived_no_match':
         unavailable(worker,job,archived=True)
         return 'cached'
-    if not ai_ready:return None
+    if not ai_ready:return 'waiting'
     content=[]
     for p in placements:
         content.append({'type':'input_text','text':'REFERENCE '+packed({'campaign_id':p['id'],

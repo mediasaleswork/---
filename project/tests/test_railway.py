@@ -9,6 +9,10 @@ from deploy.railway_entrypoint import main, prepare_config, validate_volume, ver
 
 
 class RailwayTests(unittest.TestCase):
+    def test_milestones_override_persistent_yaml_without_enabling_billing(self):
+        config=prepare_config(self.root,{'MILESTONES_HOURS':'[20, 48]'})
+        self.assertEqual(config.milestones_hours,(20,48))
+        with self.assertRaises(ValueError):prepare_config(self.root,{'MILESTONES_HOURS':'[0, 48]'})
     def test_explicit_work_configuration_overrides_saved_test_file(self):
         config = prepare_config(self.root, {'MONITOR_CONFIG_FILE': '/missing/test-config.yaml',
             'MONITOR_CONFIG_YAML': 'source_group: -12345\nconversation_mode: true\nforwarded_intake: true\nchannel_folder: каналы\nchannel_folder_watch: true\ndata_namespace: live\ntest_mode: false\nsource_since: "2026-11-09T12:00:00+00:00"\n'})

@@ -62,6 +62,7 @@ class Monitor:
         self.campaign_worker = None
         self.campaign_background = False
         self._folder_checked = 0.0
+        self.scope_ready = not config.channel_folder_watch
         if config.campaign_matching:
             from .campaigns import CampaignWorker
             self.campaign_worker = CampaignWorker(self)
@@ -77,16 +78,18 @@ class Monitor:
         self._folder_checked = asyncio.get_running_loop().time() + 600
         try:
             channels = await folder_channels(self.client, self.config.channel_folder)
-        except (ValueError, errors.RPCError) as exc:
+        except (ValueError, OSError, asyncio.TimeoutError, errors.RPCError) as exc:
             if isinstance(exc, errors.FloodWaitError):
                 raise
             log.warning("Папка каналов не прочитана (%s)", type(exc).__name__)
             # Never expand to the whole account on a missing/failed folder.
             if self.config.channel_folder_watch and not self.config.test_mode:
+                self.scope_ready = False
                 self.config = replace(self.config, allowed_channels=())
                 if self.campaign_worker:
                     self.campaign_worker.config = self.config
             return
+        self.scope_ready = True
         payload = json.dumps(channels, ensure_ascii=False)
         if self.store.state("channel_folder_inventory", "") != payload:
             self.store.set_state("channel_folder_inventory", payload)
@@ -111,7 +114,7 @@ class Monitor:
         from .campaigns import enqueue
         from .fallback import offline_match
         published = messages[0].date
-        eligible = [p for p in placements if p["status"] not in {"needs_review", "dismissed", "not_found"}
+        eligible = [p for p in placements if p["status"] not in {"needs_review", "dismissed"}
                     and not json.loads(p["direct_ids"])
                     and datetime.fromisoformat(p["starts_at"]) <= published < datetime.fromisoformat(p["ends_at"])]
         offline = [(p, offline_match(messages, p)) for p in eligible]
@@ -169,7 +172,7 @@ class Monitor:
             matched = []
             reason = ""
             for placement in placements:
-                if placement["status"] in {"needs_review", "dismissed", "not_found"}:
+                if placement["status"] in {"needs_review", "dismissed"}:
                     continue
                 direct = json.loads(placement["direct_ids"])
                 if direct:
@@ -297,6 +300,9 @@ class Monitor:
                 self.store.add_review(entity.id, message.id, f"сообщение №{message.id}", "Партнёр упомянут без ссылки на Telegram-канал; требуется уточнение")
             self.store.set_state(key, cursor_message_id)
 
+        from .reconciliation import refresh_source_materials
+        await refresh_source_materials(self,entity)
+
     async def album(self, entity, message) -> list:
         if not getattr(message, "grouped_id", None):
             return [message]
@@ -395,7 +401,7 @@ class Monitor:
             complete = end <= now and (count < self.config.batch_size or latest is not None and latest >= end)
             if complete:
                 if self.config.campaign_matching:
-                    pending = self.store.rows("SELECT placement_ids FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','review')", (partner["id"],))
+                    pending = self.store.rows("SELECT placement_ids FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','review','unavailable','archived_no_match')", (partner["id"],))
                     if any(placement["id"] in json.loads(j["placement_ids"]) for j in pending):
                         self.store.execute("UPDATE placements SET scan_complete=1 WHERE id=?", (placement["id"],))
                         continue
@@ -423,11 +429,13 @@ class Monitor:
                 else:
                     result = await capture_private_card(self.capture, self.client, partner, members, snapshot, post["url"], key, self.config.timezone)
             self.store.execute("""UPDATE snapshots SET screenshot_path=?,screenshot_status=?,screenshot_error=?,
-              screenshot_at=?,capture_attempts=capture_attempts+1 WHERE id=?""",
-              (result.path, result.status, result.error, utcnow() if result.path else None, snapshot["id"]))
+              screenshot_at=?,next_capture_at=?,capture_attempts=capture_attempts+1 WHERE id=?""",
+              (result.path, result.status, result.error, utcnow() if result.path else None,
+               None if result.path else (datetime.now(timezone.utc)+timedelta(minutes=min(240,2**min(snapshot['capture_attempts'],8)))).isoformat(), snapshot["id"]))
         except Exception as exc:
             log.warning("Ошибка скриншота поста %s: %s", post["id"], type(exc).__name__)
-            self.store.execute("UPDATE snapshots SET screenshot_status='error',screenshot_error=?,capture_attempts=capture_attempts+1 WHERE id=?", (type(exc).__name__, snapshot["id"]))
+            retry=(datetime.now(timezone.utc)+timedelta(minutes=min(240,2**min(snapshot['capture_attempts'],8)))).isoformat()
+            self.store.execute("UPDATE snapshots SET screenshot_status='error',screenshot_error=?,next_capture_at=?,capture_attempts=capture_attempts+1 WHERE id=?", (type(exc).__name__, retry, snapshot["id"]))
         finally:
             self._capturing.discard(snapshot["id"])
 
@@ -448,7 +456,7 @@ class Monitor:
                     retention_active = True
                     if until <= now and datetime.fromisoformat(post["first_seen_at"]) < until:
                         due.append((key, until.isoformat()))
-            retries = [s for s in existing if not s["screenshot_path"] and s["capture_attempts"] < 3 and s["id"] not in self._attempted and s["id"] not in self._capturing]
+            retries = [s for s in existing if not s["screenshot_path"] and (not s.get('next_capture_at') or s['next_capture_at']<=utcnow()) and s["id"] not in self._attempted and s["id"] not in self._capturing]
             # Availability continues to be checked after 48h; it never removes
             # a previously counted placement or its last successful evidence.
             messages = await self.client.get_messages(entity, ids=json.loads(post["message_ids"]))
@@ -477,11 +485,21 @@ class Monitor:
                 await self.capture_snapshot(partner, post, snapshot)
 
     async def tick(self):
+        self.store.set_state('monitor_tick_started_at',utcnow())
         self._attempted.clear()
         self.config.validate_run()
         await self.refresh_channel_folder()
         self.store.configure_plans(self.config)
-        await self.ingest_group()
+        try:
+            await self.ingest_group()
+            self.store.set_state('source_intake_error','')
+        except errors.FloodWaitError:
+            raise
+        except (OSError,asyncio.TimeoutError,errors.RPCError) as exc:
+            # Reading an existing placement must not depend on a temporary
+            # failure of the source chat. Its durable source cursor is unchanged.
+            self.store.set_state('source_intake_error',type(exc).__name__)
+            log.warning('Приём материалов отложен (%s); замеры и каналы продолжаются',type(exc).__name__)
         for partner in self.store.rows("SELECT * FROM partners WHERE status NOT IN ('ignored','needs_review')"):
             scope_ref = PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id"))
             if not self.config.permits(scope_ref):
@@ -525,9 +543,13 @@ class Monitor:
                     self.on_channel(partner, entity)
                 await self.measure(partner, entity)
                 await self.discover(partner, entity)
+                if self.config.campaign_matching:
+                    from .reconciliation import reconcile_channel
+                    await reconcile_channel(self,partner,entity)
+                self.store.set_state(f'channel_checked_at:{partner["id"]}',utcnow())
             except errors.FloodWaitError:
                 raise
-            except (ValueError, errors.RPCError) as exc:
+            except (ValueError, OSError, asyncio.TimeoutError, errors.RPCError) as exc:
                 self.store.execute("UPDATE partners SET status=?,last_error=? WHERE id=?", ("unavailable" if partner["username"] else "private", f"Не удалось проверить канал: {type(exc).__name__}; доступ не подтверждён" if not partner["username"] else f"Не удалось проверить канал: {type(exc).__name__}", partner["id"]))
                 log.warning("Канал @%s недоступен: %s", partner["username"], type(exc).__name__)
         if self.campaign_worker:
@@ -538,6 +560,7 @@ class Monitor:
                     await self.campaign_worker.process()
                 except Exception as exc:
                     log.warning("Распознавание отложено (%s); задания сохранены", type(exc).__name__)
+        self.store.set_state('monitor_tick_completed_at',utcnow())
 
 
 async def publish_reports(config, store):
@@ -573,6 +596,7 @@ async def run(config: Config, *, once: bool = False):
                         campaign_task = asyncio.create_task(campaign_loop(monitor))
                 try:
                     while True:
+                        tick_started = asyncio.get_running_loop().time()
                         monitor.wake.clear()
                         delay = config.interval_seconds
                         try:
@@ -592,6 +616,9 @@ async def run(config: Config, *, once: bool = False):
                                 raise
                         if once:
                             break
+                        # Keep a 60-second schedule from start to start; work
+                        # duration must not silently add another full minute.
+                        delay=max(0,delay-(asyncio.get_running_loop().time()-tick_started))
                         try:
                             await asyncio.wait_for(monitor.wake.wait(), timeout=delay)
                         except asyncio.TimeoutError:

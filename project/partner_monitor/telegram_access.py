@@ -9,6 +9,7 @@ class TelegramAccess:
     def __init__(self, client):
         self.raw = client
         self.blocked_until = 0.0
+        self.request_timeout = 120
 
     async def wait(self):
         while (delay := self.blocked_until - asyncio.get_running_loop().time()) > 0:
@@ -17,7 +18,7 @@ class TelegramAccess:
     async def request(self, operation):
         await self.wait()
         try:
-            return await operation()
+            return await asyncio.wait_for(operation(), timeout=self.request_timeout)
         except errors.FloodWaitError as exc:
             self.blocked_until = max(self.blocked_until, asyncio.get_running_loop().time() + exc.seconds + 1)
             raise

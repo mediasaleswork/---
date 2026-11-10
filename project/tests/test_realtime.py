@@ -183,6 +183,7 @@ class RealtimeTests(unittest.IsolatedAsyncioTestCase):
         self.capture.fail = False
         self.client.histories[200] = [message(7, "Test", views=77)]
         self.monitor._attempted.clear()  # Beginning of the next history cycle.
+        self.store.execute("UPDATE snapshots SET next_capture_at='2000-01-01T00:00:00+00:00'")
         await self.monitor.measure(self.store.rows("SELECT * FROM partners")[0], self.client.partner)
         row = self.store.rows("SELECT * FROM snapshots")[0]
         self.assertEqual(row["views"], 11)

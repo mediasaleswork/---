@@ -33,6 +33,8 @@ def prepare_config(root: Path, environment):
             data[field] = environment[variable].strip()
     if environment.get("GOOGLE_SYNC_INTERVAL_SECONDS", "").strip():
         data["google_sync_interval_seconds"] = int(environment["GOOGLE_SYNC_INTERVAL_SECONDS"])
+    if environment.get('MILESTONES_HOURS','').strip():
+        data['milestones_hours']=yaml.safe_load(environment['MILESTONES_HOURS'])
     if environment.get("CAMPAIGN_MATCHING", "").strip():
         value = environment["CAMPAIGN_MATCHING"].strip().lower()
         if value not in {"true", "false"}:

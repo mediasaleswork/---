@@ -84,6 +84,10 @@ class Store(AbstractContextManager):
           next_try_at TEXT NOT NULL, created_at TEXT NOT NULL, checked_at TEXT,
           reason TEXT NOT NULL DEFAULT '', decision TEXT, post_id INTEGER REFERENCES posts(id));
         CREATE INDEX IF NOT EXISTS campaign_pending ON campaign_checks(status,next_try_at);
+        CREATE TABLE IF NOT EXISTS source_revisions (
+          source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, revision_hash TEXT NOT NULL,
+          payload TEXT NOT NULL, recorded_at TEXT NOT NULL,
+          PRIMARY KEY(source_chat_id,message_id,revision_hash));
         """)
         # Compatible with databases created by early versions of the MVP.
         if "channel_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(partners)")}:
@@ -94,6 +98,7 @@ class Store(AbstractContextManager):
             "placements": {"client_name": "TEXT NOT NULL DEFAULT ''", "language": "TEXT NOT NULL DEFAULT ''", "planned_posts": "INTEGER",
                            "media_keys": "TEXT NOT NULL DEFAULT '[]'", "draft_id": "INTEGER", "contract_key": "TEXT NOT NULL DEFAULT ''"},
             "posts": {"last_checked_at": "TEXT", "unavailable_since": "TEXT"},
+            "snapshots": {"next_capture_at": "TEXT"},
             "contract_plans": {"baseline_until": "TEXT"},
             "campaign_checks": {"priority": "INTEGER NOT NULL DEFAULT 0", "availability_attempts": "INTEGER NOT NULL DEFAULT 0", "candidate_snapshot": "TEXT NOT NULL DEFAULT ''", "archive_signature": "TEXT NOT NULL DEFAULT ''"},
         }.items():

@@ -27,7 +27,8 @@ def current(worker,job):
     placements=[p for p in worker.store.rows('SELECT * FROM placements WHERE partner_id=?',(partner['id'],))
         if p['id'] in ids and p['status'] not in {'needs_review','dismissed'}]
     allowed=worker.config.permits(PartnerReference(partner['username'],private_channel_id=partner.get('private_channel_id')))
-    valid=(partner['status']=='active' and allowed and len(placements)==len(ids)
+    # A transport/access failure is a pause, not a change of campaign scope.
+    valid=(partner['status'] not in {'ignored','needs_review','identity_changed'} and allowed and len(placements)==len(ids)
         and all(str(p['source_chat_id'])==str(worker.monitor.source_peer_id) for p in placements)
         and source_signature(placements,model_identity(worker.config))==job['source_signature'])
     return (partner,placements) if valid else (None,[])
@@ -61,6 +62,16 @@ def maintain_queue(worker):
                 worker.finish(job,'obsolete','Повтор той же версии публикации; полная проверка '+covering['id'][:12])
             else:keep.append(job)
     save_status(worker)
+
+
+def settle_placements(worker):
+    """Close a completed search only after every incomplete check is resolved."""
+    waiting={pid for job in worker.store.rows("SELECT placement_ids FROM campaign_checks WHERE status IN ('pending','error','review','unavailable','archived_no_match')")
+             for pid in json.loads(job['placement_ids'])}
+    for row in worker.store.rows("SELECT id FROM placements WHERE scan_complete=1 AND status='watching'"):
+        if row['id'] not in waiting:
+            worker.store.execute("""UPDATE placements SET status=CASE WHEN EXISTS(
+              SELECT 1 FROM placement_posts WHERE placement_id=placements.id) THEN 'found' ELSE 'not_found' END WHERE id=?""",(row['id'],))
 
 
 def save_status(worker):
@@ -112,7 +123,9 @@ async def process_batch(worker):
         for _ in range(worker.config.campaign_batch_size):
             now=utcnow()
             ai_ready=store.state('campaign_quota_retry_at','')<=now and store.state('campaign_next_request_at','')<=now and budget(worker)
-            jobs=store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT 1000",(now,))
+            jobs=store.rows("""SELECT j.* FROM campaign_checks j JOIN partners p ON p.id=j.partner_id
+              WHERE p.status='active' AND j.status IN ('pending','error','unavailable','archived_no_match')
+              AND j.next_try_at<=? ORDER BY j.priority DESC,j.created_at,j.id LIMIT 1000""",(now,))
             if not ai_ready:
                 from .archived_checks import caption_payload
                 jobs=[j for j in jobs if j['status']=='archived_no_match' or j['status']=='unavailable' and not caption_payload(j)]
@@ -201,10 +214,14 @@ async def process_batch(worker):
                 verdicts={key:validate_decision(value,[p['id'] for p in placements]) for key,value in values.items()}
                 refreshed=await worker.monitor.client.get_messages(entity,ids=ids)
                 by_id={m.id:m for m in refreshed if isinstance(m,types.Message)}
+                if not getattr(worker.monitor,'scope_ready',True):
+                    return
                 for job,previous,_ in ready:
                     _,latest=current(worker,job)
                     if not latest:
                         worker.finish(job,'obsolete','Материал изменился во время проверки');continue
+                    if store.rows('SELECT status FROM partners WHERE id=?',(job['partner_id'],))[0]['status']!='active':
+                        continue  # Preserve the job if channel access changed during the request.
                     messages=[by_id[mid] for mid in json.loads(job['message_ids']) if mid in by_id]
                     if len(messages)!=len(previous):unavailable(worker,job);continue
                     if candidate_signature(messages)!=job['candidate_signature']:
@@ -224,4 +241,6 @@ async def process_batch(worker):
             except ValueError:
                 defer(worker,[j for j,_,_ in ready] or group,'invalid_batch_response')
                 return
-    finally:save_status(worker)
+    finally:
+        settle_placements(worker)
+        save_status(worker)

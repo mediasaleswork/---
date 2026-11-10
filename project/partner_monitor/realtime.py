@@ -43,6 +43,7 @@ class Realtime:
         self.raw.add_event_handler(self.new_message, events.NewMessage())
         self.raw.add_event_handler(self.album, events.Album())
         self.raw.add_event_handler(self.deleted, events.MessageDeleted())
+        self.raw.add_event_handler(self.edited, events.MessageEdited())
         self.monitor.on_channel = self.register_channel
 
     def watching(self, partner_id):
@@ -133,6 +134,21 @@ class Realtime:
     async def album(self, event):
         await self._event(event.messages)
 
+    async def edited(self, event):
+        message=event.message
+        if self.monitor.config.forwarded_intake and utils.get_peer_id(message.peer_id)==self.monitor.source_peer_id:
+            import json
+            if getattr(message,'grouped_id',None):
+                message=(await self.monitor.album(message.peer_id,message))[0]
+            pending=json.loads(self.monitor.store.state('source_edited_ids','[]'))
+            self.monitor.store.set_state('source_edited_ids',json.dumps(list(dict.fromkeys(pending+[message.id]))))
+            self.monitor.wake.set()
+            return
+        if getattr(message,'grouped_id',None):
+            await self._event(await self.monitor.album(message.peer_id,message))
+        else:
+            await self._event([message])
+
     async def deleted(self, event):
         from .parsing import PartnerReference
         from .storage import utcnow
@@ -157,6 +173,8 @@ class Realtime:
 
     async def deliver_deletions(self, updates):
         for update in updates or []:
+            if isinstance(update,types.UpdateEditChannelMessage):
+                await self.deliver([update.message],expand_albums=True)
             if isinstance(update, types.UpdateDeleteChannelMessages):
                 event = events.MessageDeleted.build(update, None, None)
                 if event is not None:
@@ -215,6 +233,7 @@ class Realtime:
         self.raw.remove_event_handler(self.new_message)
         self.raw.remove_event_handler(self.album)
         self.raw.remove_event_handler(self.deleted)
+        self.raw.remove_event_handler(self.edited)
         jobs = list(self.tasks.values()) + list(self.handlers)
         for task in jobs:
             task.cancel()

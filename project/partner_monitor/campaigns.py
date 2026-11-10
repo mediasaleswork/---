@@ -121,6 +121,8 @@ def enqueue(store, config, partner, messages, placements):
     store.execute("""INSERT OR IGNORE INTO campaign_checks(id,partner_id,message_ids,placement_ids,
         source_signature,candidate_signature,next_try_at,created_at,priority,candidate_snapshot) VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (ident, partner["id"], packed(ids), packed(sorted(p["id"] for p in placements)), source, candidate, stamp, stamp, priority,snapshot))
+    for placement in placements:
+        store.execute("UPDATE placements SET status='watching' WHERE id=? AND status='not_found'",(placement['id'],))
 
 
 def validate_decision(value, campaign_ids):
@@ -319,6 +321,8 @@ class CampaignWorker:
                 await self.monitor.client.download_media(message, file=buffer, thumb=-1)
                 if buffer.getvalue():
                     result.append(await asyncio.to_thread(image_input, buffer.getvalue()))
+                else:
+                    raise CampaignAPIError('media_unavailable')
         return result
 
     async def reference_images(self, placement):
@@ -351,7 +355,7 @@ class CampaignWorker:
             await self._process()
 
     async def _process(self):
-        if self.monitor.source_peer_id is None:
+        if self.monitor.source_peer_id is None or not getattr(self.monitor,'scope_ready',True):
             return
         from .campaign_queue import maintain_queue,process_batch
         maintain_queue(self)
@@ -369,10 +373,12 @@ class CampaignWorker:
             ids = json.loads(job["placement_ids"])
             placements = [p for p in self.store.rows("SELECT * FROM placements WHERE partner_id=?", (job["partner_id"],))
                           if p["id"] in ids and p["status"] not in {"needs_review", "dismissed"}]
-            if (not partner or partner["status"] != "active" or not self.config.permits(PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id")))
+            if (not partner or partner["status"] in {"ignored","needs_review","identity_changed"} or not self.config.permits(PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id")))
                     or len(placements) != len(ids) or any(str(p["source_chat_id"]) != str(self.monitor.source_peer_id) for p in placements)
                     or source_signature(placements, model_identity(self.config)) != job["source_signature"]):
                 self.finish(job, "obsolete", "Настройки, материал или область наблюдения изменились")
+                continue
+            if partner['status']!='active':
                 continue
             if len(placements) > MAX_CAMPAIGNS:
                 self.finish(job, "review", "Слишком много одновременно подходящих кампаний; уточните материал")
@@ -461,12 +467,8 @@ class CampaignWorker:
                 self.finish(job, "review", "Некорректный ответ распознавания; совпадение не засчитано")
         # A finished history scan is not a negative result while a queued or
         # uncertain candidate still exists. Once all are rejected, close it.
-        waiting = {pid for j in self.store.rows("SELECT placement_ids FROM campaign_checks WHERE status IN ('pending','error','review','unavailable')")
-                   for pid in json.loads(j["placement_ids"])}
-        for placement in self.store.rows("SELECT id FROM placements WHERE scan_complete=1 AND status='watching'"):
-            if placement["id"] not in waiting:
-                self.store.execute("""UPDATE placements SET status=CASE WHEN EXISTS(
-                    SELECT 1 FROM placement_posts WHERE placement_id=placements.id) THEN 'found' ELSE 'not_found' END WHERE id=?""", (placement["id"],))
+        from .campaign_queue import settle_placements
+        settle_placements(self)
 
     def finish(self, job, status, reason, value=None):
         self.store.execute("UPDATE campaign_checks SET status=?,reason=?,decision=?,checked_at=? WHERE id=?",

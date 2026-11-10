@@ -168,6 +168,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             first = self.store.rows("SELECT * FROM snapshots")[0]
             client.histories[200][0].views = 120
             capture.fail = False
+            self.store.execute("UPDATE snapshots SET next_capture_at='2000-01-01T00:00:00+00:00'")
             await monitor.tick()
         after = self.store.rows("SELECT * FROM snapshots")[0]
         self.assertEqual(after["checked_at"], first["checked_at"])

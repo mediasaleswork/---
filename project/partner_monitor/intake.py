@@ -268,6 +268,36 @@ class ConversationIntake:
         self._log(chat, message, content, draft, targets, "material")
         log.info("Рекламный материал #%s принят из группы; площадок %s", message.id, len(targets))
 
+    def refresh_forwarded(self, chat, message, content):
+        """Reconcile an edit to an already ingested message; retain its old data."""
+        previous=self.store.rows('SELECT * FROM source_messages WHERE source_chat_id=? AND message_id=?',(str(chat),message.id))
+        if not previous:
+            return
+        old=previous[0]
+        if old['text']==content.text and tuple(json.loads(old['media_keys']))==content.media:
+            return
+        if not self.config.allowed_channels:
+            raise OSError('Папка каналов пока не прочитана; правка материала отложена')
+        from .campaigns import digest
+        self.store.execute('INSERT OR IGNORE INTO source_revisions VALUES (?,?,?,?,?)',
+            (str(chat),message.id,digest(old),packed(old),utcnow()))
+        draft=self._draft(old['draft_id']) if old['draft_id'] else None
+        if draft and draft['anchor_id']==message.id:
+            text=content.text.strip()
+            name=next((line.strip()[:100] for line in text.splitlines() if line.strip()),f'Рекламный материал №{message.id}')
+            self.store.execute('UPDATE intake_drafts SET name=?,creative_text=?,media_keys=?,updated_at=? WHERE id=?',
+                (name,text,packed(content.media),utcnow(),draft['id']))
+            draft=self._draft(draft['id'])
+            self._sync(draft,message.date,list(self.config.allowed_channels),approved=True)
+            self.store.execute('UPDATE placements SET scan_complete=0 WHERE draft_id=?',(draft['id'],))
+        else:
+            self.consume_forwarded(chat,message,content)
+            matches=self.store.rows('SELECT * FROM intake_drafts WHERE source_chat_id=? AND creative_text=? AND media_keys=? ORDER BY id DESC LIMIT 1',
+                (str(chat),content.text.strip(),packed(content.media)))
+            draft=matches[0] if matches else None
+        self.store.execute('UPDATE source_messages SET text=?,media_keys=?,draft_id=?,kind=? WHERE source_chat_id=? AND message_id=?',
+            (content.text,packed(content.media),draft['id'] if draft else None,'material_edited' if draft else 'ignored',str(chat),message.id))
+
     def attach_folder_channels(self, received):
         if not self.config.forwarded_intake:
             return

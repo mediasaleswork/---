@@ -400,7 +400,7 @@ class Monitor:
             complete = end <= now and (count < self.config.batch_size or latest is not None and latest >= end)
             if complete:
                 if self.config.campaign_matching:
-                    pending = self.store.rows("SELECT placement_ids FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','review','unavailable','archived_no_match')", (partner["id"],))
+                    pending = self.store.rows("SELECT placement_ids FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','review','unavailable','archived_no_match','local_checked','offline_review')", (partner["id"],))
                     if any(placement["id"] in json.loads(j["placement_ids"]) for j in pending):
                         self.store.execute("UPDATE placements SET scan_complete=1 WHERE id=?", (placement["id"],))
                         continue

@@ -176,14 +176,15 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertEqual([p["message_id"] for p in self.store.rows("SELECT * FROM posts")], [8])
 
-    async def test_no_api_key_keeps_queue_and_does_not_spend_budget(self):
+    async def test_no_api_key_checks_locally_and_does_not_spend_budget(self):
         self.prepare()
         self.monitor.campaign_worker = CampaignWorker(self.monitor)
         with patch.dict(os.environ, {}, clear=True), patch("partner_monitor.campaigns.requests.post") as http:
             await self.tick()
             http.assert_not_called()
-        self.assertEqual(self.store.rows("SELECT status,attempts,reason FROM campaign_checks")[0],
-                         {"status": "pending", "attempts": 0, "reason": "missing_api_key"})
+        row=self.store.rows("SELECT status,attempts,reason FROM campaign_checks")[0]
+        self.assertEqual((row['status'],row['attempts']),('local_checked',0))
+        self.assertIn('Проверено без ИИ',row['reason'])
         self.assertFalse(self.store.rows("SELECT * FROM posts"))
 
     async def test_total_test_limit_survives_new_day_budget_reset(self):
@@ -195,7 +196,7 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertEqual(self.judge.compare.call_count, 1)
         self.assertEqual(self.store.state("campaign_api_attempts_total"), "1")
-        self.assertEqual(self.store.rows("SELECT COUNT(*) AS n FROM campaign_checks WHERE status='pending'")[0]["n"], 1)
+        self.assertEqual(self.store.rows("SELECT COUNT(*) AS n FROM campaign_checks WHERE status='local_checked'")[0]["n"], 1)
 
     async def test_quota_error_pauses_whole_queue_and_never_counts_or_switches_provider(self):
         self.prepare(candidates=[message(7, "Первый"), message(8, "Второй")])
@@ -284,7 +285,7 @@ class CampaignIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_state("campaign_quota_retry_at", (NOW + timedelta(days=3650)).isoformat())
         await self.tick()
         self.judge.compare.assert_not_called()
-        self.assertEqual(self.store.rows("SELECT status FROM campaign_checks")[0]["status"], "pending")
+        self.assertEqual(self.store.rows("SELECT status FROM campaign_checks")[0]["status"], "local_checked")
         self.store.set_state("campaign_quota_retry_at", "")
         await self.tick()
         self.assertEqual(len(self.store.rows("SELECT * FROM posts")), 1)

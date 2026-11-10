@@ -192,7 +192,7 @@ def main(argv=None):
                         print(f"  распознавание {row['status']}: {row['n']}")
                 elif args.command == "campaign-review":
                     rows = store.rows("""SELECT c.id,p.username,c.message_ids,c.status,c.reason FROM campaign_checks c
-                        JOIN partners p ON p.id=c.partner_id WHERE c.status IN ('review','error','pending') ORDER BY c.created_at LIMIT 100""")
+                        JOIN partners p ON p.id=c.partner_id WHERE c.status IN ('review','error','pending','local_checked','offline_review') ORDER BY c.created_at LIMIT 100""")
                     print(json.dumps(rows, ensure_ascii=False, indent=2))
                 elif args.command == "sync-google":
                     from .reports import GoogleReporter

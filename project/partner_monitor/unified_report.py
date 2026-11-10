@@ -102,11 +102,16 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     archive_pending={(p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' and has_caption(j)}
     pending=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'pending','error'})+len(archive_pending)
     unknown={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' and not has_caption(j) }
-    review={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status')=='review' }
+    review={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status') in {'review','offline_review'} }
     archived={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status')=='archived_no_match' }
     queue_note=f"Ожидают распознавания: {pending}. Без сохранённого текста: {len(unknown)}. Архивная сверка: {len(archived)}. Нужна сверка: {len(review)} (см. «Недоступные посты»)." if any('campaign_queue' in p for p in partners) else ''
+    local_count=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'local_checked','offline_review'})
+    local_mode=any(p.get('campaign_mode')=='local' for p in partners)
+    if local_mode or local_count:
+        mode='Без ИИ — локальное сравнение' if local_mode else 'ИИ доступен; локальные проверки дополнительно сверяются'
+        queue_note=mode+'. '+queue_note+f' Проверено локально без подтверждения: {local_count}.'
     put(report, 5, 1, note or queue_note or ('' if compact else "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён."))
-    report.row_dimensions[5].height = 30
+    report.row_dimensions[5].height = 45 if local_mode or local_count else 30
     band(report, 7, "СВОДКА ПО ПЛОЩАДКАМ")
     headers = ["№", "Инструмент", "Площадки", "Язык", "Заказано постов", "Опубликовано", "Осталось опубликовать", "Постов за период", "Не удалось открыть", "Постов со скриншотом", "Последняя публикация", "Публикации"]
     if compact:
@@ -287,7 +292,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
             mid=min(json.loads(job['message_ids']))
             url=f"https://t.me/{partner['username']}/{mid}" if partner.get('username') else f"https://t.me/c/{partner.get('channel_id')}/{mid}"
             info=json.loads(job.get('candidate_snapshot') or '{}')
-            needs_review=job.get('status')=='review'
+            needs_review=job.get('status') in {'review','offline_review'}
             is_archived=job.get('status')=='archived_no_match'
             reason=job['reason']+(' Требуется проверка совпадения.' if needs_review else ' Повтор: '+shown_time(local(job['next_try_at'],tz))+'.')
             waiting.append((job,info))

@@ -383,12 +383,13 @@ class CampaignWorker:
             raise
         except (OSError,asyncio.TimeoutError,ValueError,errors.RPCError) as exc:
             log.warning('Поиск сохранённой пересылки отложен (%s); очередь каналов продолжается',type(exc).__name__)
-        if callable(getattr(type(self.judge),'compare_many',None)):
+        from .campaign_local import local_reason
+        if callable(getattr(type(self.judge),'compare_many',None)) or local_reason(self,utcnow()):
             await process_batch(self)
             return
         if self.store.state("campaign_quota_retry_at", "") > utcnow():
             return
-        for job in self.store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT ?",
+        for job in self.store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','local_checked','offline_review') AND next_try_at<=? ORDER BY priority DESC,created_at,id LIMIT ?",
                                    (utcnow(), self.config.campaign_batch_size)):
             partner_rows = self.store.rows("SELECT * FROM partners WHERE id=?", (job["partner_id"],))
             partner = partner_rows[0] if partner_rows else None

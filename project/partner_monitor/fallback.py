@@ -1,6 +1,7 @@
 """Conservative campaign matching that works without an AI quota/key.
 
-Brand/domain alone is not sufficient. Uncertain publications stay queued.
+Brand/domain alone is not sufficient. campaign_local also checks text copies,
+exact video destinations and image fingerprints while a provider is unavailable.
 """
 import json
 import re

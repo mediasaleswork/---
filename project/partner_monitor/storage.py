@@ -210,8 +210,8 @@ class Store(AbstractContextManager):
             # Intake diagnostics travel through the existing report API without
             # changing its three-list signature. Only the first partner owns it.
             partner["intake"] = []
-            partner["campaign_checks"] = self.rows("SELECT message_ids,status,reason,checked_at,next_try_at,availability_attempts,candidate_snapshot FROM campaign_checks WHERE partner_id=? AND status IN ('unavailable','review','archived_no_match') ORDER BY created_at DESC",(partner['id'],))
-            partner["campaign_queue"] = self.rows("SELECT status,COUNT(*) AS n FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','unavailable','review','archived_no_match') GROUP BY status",(partner['id'],))
+            partner["campaign_checks"] = self.rows("SELECT message_ids,status,reason,checked_at,next_try_at,availability_attempts,candidate_snapshot FROM campaign_checks WHERE partner_id=? AND status IN ('unavailable','review','archived_no_match','offline_review') ORDER BY created_at DESC",(partner['id'],))
+            partner["campaign_queue"] = self.rows("SELECT status,COUNT(*) AS n FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','unavailable','review','archived_no_match','local_checked','offline_review') GROUP BY status",(partner['id'],))
             partner["placements"] = self.rows("SELECT * FROM placements WHERE partner_id=? ORDER BY id", (partner["id"],))
             for placement in partner["placements"]:
                 placement["post_urls"] = [r["url"] for r in self.rows("SELECT p.url FROM posts p JOIN placement_posts x ON x.post_id=p.id WHERE x.placement_id=?", (placement["id"],))]
@@ -220,6 +220,8 @@ class Store(AbstractContextManager):
             post["measurement_jobs"] = self.rows("SELECT * FROM measurement_jobs WHERE post_id=? ORDER BY due_at", (post["id"],))
             post["placement_ids"] = [r["placement_id"] for r in self.rows("SELECT placement_id FROM placement_posts WHERE post_id=?", (post["id"],))]
         if partners:
+            partners[0]['campaign_mode']=self.state('campaign_mode','ai')
+            partners[0]['campaign_local_reason']=self.state('campaign_local_reason','')
             partners[0]["intake"] = self.rows("""SELECT s.*,d.name AS draft_name,d.client_name FROM source_messages s
               LEFT JOIN intake_drafts d ON d.id=s.draft_id WHERE s.kind!='ignored' ORDER BY received_at,message_id""")
         return (partners, posts,

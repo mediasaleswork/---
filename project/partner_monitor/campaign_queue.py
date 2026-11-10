@@ -37,7 +37,7 @@ def maintain_queue(worker):
         store.execute("UPDATE campaign_checks SET status='unavailable',next_try_at=? WHERE status='review' AND reason='Публикация недоступна; совпадение не засчитано'",(utcnow(),))
         store.set_state('campaign_unavailable_retry_v1',utcnow())
     groups={}
-    for job in store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match') ORDER BY created_at DESC"):
+    for job in store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match','local_checked','offline_review') ORDER BY created_at DESC"):
         partner,placements=current(worker,job)
         if not partner:
             worker.finish(job,'obsolete','Настройки, материал или область наблюдения изменились')
@@ -57,7 +57,7 @@ def maintain_queue(worker):
 
 def settle_placements(worker):
     """Close a completed search only after every incomplete check is resolved."""
-    waiting={pid for job in worker.store.rows("SELECT placement_ids FROM campaign_checks WHERE status IN ('pending','error','review','unavailable','archived_no_match')")
+    waiting={pid for job in worker.store.rows("SELECT placement_ids FROM campaign_checks WHERE status IN ('pending','error','review','unavailable','archived_no_match','local_checked','offline_review')")
              for pid in json.loads(job['placement_ids'])}
     for row in worker.store.rows("SELECT id FROM placements WHERE scan_complete=1 AND status='watching'"):
         if row['id'] not in waiting:
@@ -69,7 +69,8 @@ def save_status(worker):
     store=worker.store
     data={'checked_at':utcnow(),'counts':store.rows('SELECT status,COUNT(*) AS n FROM campaign_checks GROUP BY status'),
         'oldest_pending':store.rows("SELECT MIN(created_at) AS created_at FROM campaign_checks WHERE status IN ('pending','error')"),
-        'unavailable':store.rows("SELECT p.username,j.message_ids,j.status,j.reason,j.availability_attempts,j.next_try_at FROM campaign_checks j JOIN partners p ON p.id=j.partner_id WHERE j.status IN ('unavailable','archived_no_match')")}
+        'unavailable':store.rows("SELECT p.username,j.message_ids,j.status,j.reason,j.availability_attempts,j.next_try_at FROM campaign_checks j JOIN partners p ON p.id=j.partner_id WHERE j.status IN ('unavailable','archived_no_match')"),
+        'mode':store.state('campaign_mode','ai'),'mode_reason':store.state('campaign_local_reason','')}
     store.set_state('campaign_queue_status',packed(data))
     # Operational details remain on the service's existing private volume.
     root=worker.config.runtime_dir
@@ -127,15 +128,23 @@ def defer(worker,jobs,code):
 
 async def process_batch(worker):
     from .campaign_batching import choose_group,process_group
+    from .campaign_local import local_reason
     from .archived_checks import caption_payload
     store=worker.store
     try:
         for _ in range(worker.config.campaign_batch_size):
             now=utcnow()
-            ai_ready=(store.state('campaign_quota_retry_at','')<=now
-                and store.state('campaign_service_retry_at','')<=now
-                and store.state('campaign_next_request_at','')<=now and budget(worker))
-            where="p.status='active' AND j.status IN ('pending','error','unavailable','archived_no_match') AND j.next_try_at<=?"
+            offline=local_reason(worker,now)
+            store.set_state('campaign_mode','local' if offline else 'ai')
+            store.set_state('campaign_local_reason',offline)
+            ai_ready=not offline and store.state('campaign_next_request_at','')<=now
+            statuses="'pending','error','unavailable','archived_no_match'"
+            if ai_ready:statuses+=",'local_checked','offline_review'"
+            due="j.next_try_at<=?"
+            if offline:
+                # A provider retry deadline must not hold back a local check.
+                due="("+due+" OR (j.status='error' AND (j.reason LIKE 'http_%' OR j.reason IN ('request_timeout','network_unavailable','missing_api_key'))))"
+            where="p.status='active' AND j.status IN ("+statuses+") AND "+due
             sql='SELECT j.* FROM campaign_checks j JOIN partners p ON p.id=j.partner_id WHERE '+where
             jobs=store.rows(sql+' ORDER BY j.priority DESC,j.created_at,j.id LIMIT 1000',(now,))
             # Include global oldest/newest even when >1000 high-priority jobs
@@ -143,7 +152,7 @@ async def process_batch(worker):
             for order in ('j.created_at,j.id','j.created_at DESC,j.id DESC'):
                 for job in store.rows(sql+' ORDER BY '+order+' LIMIT 1',(now,)):
                     if not any(j['id']==job['id'] for j in jobs):jobs.append(job)
-            if not ai_ready:
+            if not ai_ready and not offline:
                 jobs=[j for j in jobs if j.get('provisional_decision') or j['status']=='archived_no_match'
                     or j['status']=='unavailable' and not caption_payload(j)]
             if not jobs:return
@@ -151,7 +160,7 @@ async def process_batch(worker):
             group=choose_group(worker,jobs,turn)
             if not group:return
             store.set_state('campaign_queue_turn',turn+1)
-            if not await process_group(worker,group,ai_ready):return
+            if not await process_group(worker,group,ai_ready,offline):return
     finally:
         settle_placements(worker)
         save_status(worker)

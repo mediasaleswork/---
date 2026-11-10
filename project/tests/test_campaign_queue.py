@@ -47,13 +47,14 @@ class QueueTests(IsolatedAsyncioTestCase):
         self.assertFalse(self.store.rows('SELECT * FROM posts'))
         self.assertEqual({r['status'] for r in self.store.rows('SELECT status FROM campaign_checks')},{'error'})
 
-    async def test_shared_quota_error_keeps_entire_batch_and_never_counts(self):
+    async def test_shared_quota_error_switches_to_local_checks_and_never_fabricates_matches(self):
         self.batch(candidates=[message(7,'Первый материал'),message(8,'Второй материал')])
         self.judge.failure=CampaignAPIError('http_429')
         await self.tick();await self.tick()
         self.assertEqual(len(self.judge.calls),1)
         self.assertFalse(self.store.rows('SELECT * FROM posts'))
-        self.assertEqual(len(self.store.rows("SELECT * FROM campaign_checks WHERE status='error'")),2)
+        self.assertEqual(len(self.store.rows("SELECT * FROM campaign_checks WHERE status='local_checked'")),2)
+        self.assertEqual(self.store.state('campaign_mode'),'local')
 
     async def test_unavailable_post_is_retried_and_can_be_recovered(self):
         self.batch(candidates=[message(7,'Материал с изменённым текстом')])

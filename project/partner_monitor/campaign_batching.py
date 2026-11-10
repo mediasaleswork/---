@@ -107,7 +107,7 @@ async def commit(worker, candidate, value, messages):
         worker.store.execute("UPDATE campaign_checks SET status='error',reason='individual_review',individual_review=1,next_try_at=?,provisional_decision='' WHERE id=?", (utcnow(), job['id']))
 
 
-async def prepare(worker, group, ai_ready):
+async def prepare(worker, group, ai_ready, offline=''):
     from .campaign_queue import current, unavailable
     ready = []
     partners = {}
@@ -137,6 +137,9 @@ async def prepare(worker, group, ai_ready):
                 continue
             messages = [by_id[mid] for mid in json.loads(job['message_ids']) if mid in by_id]
             if len(messages) != len(json.loads(job['message_ids'])):
+                if offline and not job.get('provisional_decision'):
+                    unavailable(worker,job,archived=job['status']=='archived_no_match')
+                    continue
                 from .archived_checks import check_saved_caption
                 from .campaign_queue import defer
                 try:
@@ -195,10 +198,17 @@ def collect_more(worker, ready):
     return (datetime.now(timezone.utc) - oldest).total_seconds() < COLLECT_SECONDS
 
 
-async def process_group(worker, group, ai_ready):
+async def process_group(worker, group, ai_ready, offline=''):
     from .campaign_queue import current, defer
-    ready, requested = await prepare(worker, group, ai_ready)
-    if requested or not ready or not ai_ready or collect_more(worker, ready):
+    ready, requested = await prepare(worker, group, ai_ready, offline)
+    if requested or not ready:
+        return False
+    if offline:
+        from .campaign_local import check_candidate
+        for candidate in ready:
+            await check_candidate(worker,candidate,offline)
+        return True
+    if not ai_ready or collect_more(worker, ready):
         return False
     variable=getattr(worker.judge,'key_variable',None)
     if variable and not os.environ.get(variable,'').strip():

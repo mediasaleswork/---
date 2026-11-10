@@ -34,7 +34,7 @@ HYPOTHESES = {
     'лицензирование':'Возможно, после получения лицензии компания готовит выход к клиентам; запуск и потребность ещё нужно уточнить.',
 }
 
-AD_MARKER=re.compile(r'\(\s*(?:реклама|reklama|advertisement)\s*\)|(?<!\w)#(?:реклама|reklama|ad)\b|(?<!\w)(?:реклама|reklama|advertisement)\s*[.!]?\s*$',re.I)
+AD_MARKER=re.compile(r'\(\s*(?:реклама|на\s+правах\s+рекламы|reklama|advertisement)\s*\)|(?<!\w)#(?:реклама|reklama|ad)\b|(?<!\w)(?:реклама|на\s+правах\s+рекламы|reklama|advertisement)\s*[.!]?\s*$',re.I)
 AD_NAME=re.compile(r"[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,5}")
 AD_STOP={'IT','HR','EIOS','III','II','I','IV','V','VI','VII','VIII','IX','X','Batafsil','Reklama','Telegram','Instagram','Facebook','Sayt','The','Today',
     'KUNDAN','SO‘NG','BIRINCHI','ANIQLANADI','JAMI','SOVG‘A','Chimyonda','Dam'}

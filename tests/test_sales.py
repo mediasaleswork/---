@@ -161,6 +161,15 @@ class SalesTests(unittest.TestCase):
         self.assertFalse(RuleResearcher().classify([dict(self.source,text=text,title=text)],NOW))
         self.assertFalse(is_advertisement('Реклама в Telegram становится популярной: компания рассказала о тенденциях рынка.'))
 
+    def test_paid_material_marker_with_link_is_recognized(self):
+        text='Octobank получил награду Visa за развитие цифровых платежей в Узбекистане. Награда стала признанием достижений банка. https://kapital.uz/octobank-poluchil-nagradu/ (на правах рекламы)'
+        source=dict(self.source,text=text,title=text[:180])
+        self.assertTrue(relevant(source))
+        found=RuleResearcher().classify([source],NOW)
+        self.assertEqual(len(found),1)
+        self.assertEqual(found[0]['company'],'Octobank')
+        self.assertIsNotNone(validate(found[0],{source['id']:source},NOW))
+
     def test_advertiser_is_not_a_location_product_or_research_title(self):
         examples=[
             ('2 KUNDAN SO‘NG BIRINCHI G‘OLIBLAR ANIQLANADI! ASLZAR’dan uy va avtomobil yutib olish imkoniyati tobora yaqinlashmoqda! #реклама','ASLZAR',()),

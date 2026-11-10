@@ -102,6 +102,17 @@ class QueueTests(IsolatedAsyncioTestCase):
         self.assertFalse(self.judge.calls)
         self.assertTrue(self.monitor.campaign_wake.is_set())
 
+    async def test_uncertain_batch_is_rechecked_individually_before_manual_review(self):
+        self.batch(candidates=[message(7,'Непохожий материал')])
+        self.judge.compare_many=lambda content,ids:{i:cases.decision(None,'different_campaign',confidence=.8) for i in ids}
+        await self.tick()
+        self.assertEqual(self.store.rows('SELECT reason FROM campaign_checks')[0]['reason'],'individual_review')
+        self.store.set_state('campaign_next_request_at','')
+        with patch.object(BatchJudge,'compare',create=True,return_value=cases.decision(None,'different_campaign')) as single:
+            await self.monitor.campaign_worker.process()
+            single.assert_called_once()
+        self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'no_match')
+
 
 class BatchProtocolTests(TestCase):
     def test_short_labels_keep_schema_small_and_results_map_to_exact_jobs(self):

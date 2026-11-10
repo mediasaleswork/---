@@ -38,6 +38,9 @@ def maintain_queue(worker):
     if not store.state('campaign_batch_labels_v2',''):
         store.execute("UPDATE campaign_checks SET next_try_at=? WHERE status='error' AND reason LIKE 'http_400%'",(utcnow(),))
         store.set_state('campaign_batch_labels_v2',utcnow())
+    if not store.state('campaign_individual_review_v1',''):
+        store.execute("UPDATE campaign_checks SET status='error',reason='individual_review',next_try_at=? WHERE status='review' AND decision IS NOT NULL AND attempts<3",(utcnow(),))
+        store.set_state('campaign_individual_review_v1',utcnow())
     if not store.state('campaign_unavailable_retry_v1',''):
         store.execute("UPDATE campaign_checks SET status='unavailable',next_try_at=? WHERE status='review' AND reason='Публикация недоступна; совпадение не засчитано'",(utcnow(),))
         store.set_state('campaign_unavailable_retry_v1',utcnow())
@@ -116,7 +119,7 @@ async def process_batch(worker):
             # Every fourth request starts with the newest candidate, including
             # an image-only post. Other requests steadily drain the backlog.
             anchor=max(jobs,key=lambda j:j['created_at']) if turn%4==0 else jobs[0]
-            size=max(1,GROUP_SIZE//2**min(anchor['attempts'],3)) if anchor['reason'].startswith('http_400') else GROUP_SIZE
+            size=1 if anchor['reason']=='individual_review' else max(1,GROUP_SIZE//2**min(anchor['attempts'],3)) if anchor['reason'].startswith('http_400') else GROUP_SIZE
             group=[anchor]+[j for j in jobs if j['id']!=anchor['id'] and j['partner_id']==anchor['partner_id']
                 and j['placement_ids']==anchor['placement_ids'] and j['source_signature']==anchor['source_signature']][:size-1]
             partner,placements=current(worker,anchor)
@@ -183,7 +186,10 @@ async def process_batch(worker):
                 store.set_state('campaign_api_attempts_total',int(store.state('campaign_api_attempts_total'))+1)
                 store.set_state('campaign_next_request_at',(datetime.now(timezone.utc)+timedelta(seconds=10)).isoformat())
                 for job,_,_ in ready:store.execute('UPDATE campaign_checks SET attempts=attempts+1 WHERE id=?',(job['id'],))
-                values=await asyncio.to_thread(worker.judge.compare_many,content,[j['id'] for j,_,_ in ready])
+                if len(ready)==1 and ready[0][0]['reason']=='individual_review' and callable(getattr(type(worker.judge),'compare',None)):
+                    values={ready[0][0]['id']:await asyncio.to_thread(worker.judge.compare,content)}
+                else:
+                    values=await asyncio.to_thread(worker.judge.compare_many,content,[j['id'] for j,_,_ in ready])
                 if not isinstance(values,dict) or set(values)!={j['id'] for j,_,_ in ready}:raise CampaignAPIError('incomplete_batch_response')
                 # Validate the whole response before committing ANY verdict.
                 verdicts={key:validate_decision(value,[p['id'] for p in placements]) for key,value in values.items()}
@@ -204,6 +210,8 @@ async def process_batch(worker):
                         post_id=await worker.monitor.record_post(partner,entity,messages,'campaign: '+value['reason'][:700],[chosen])
                         store.execute('UPDATE campaign_checks SET post_id=? WHERE id=?',(post_id,job['id']))
                     worker.finish(job,status,value['reason'],value)
+                    if status=='review' and job['reason']!='individual_review' and job['attempts']<3:
+                        store.execute("UPDATE campaign_checks SET status='error',reason='individual_review',next_try_at=? WHERE id=?",(utcnow(),job['id']))
             except CampaignAPIError as exc:
                 defer(worker,[j for j,_,_ in ready] or group,str(exc))
                 return

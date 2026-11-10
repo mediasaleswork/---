@@ -80,7 +80,7 @@ def export_sheet(sheet,partners,timezone_name):
             status=review['status']
             next_try='' if status in FINAL_STATES else (
                 'После восстановления Gemini' if status in {'local_checked','offline_review'} else local(review['next_try_at'],tz))
-            events='\n'.join(e['recorded_at'][:19].replace('T',' ')+' UTC — '+labels.get(e['status'],e['status'])+': '+explanation(e['reason'])[:160] for e in reversed(review['events']))
+            events='\n'.join(local(e['recorded_at'],tz)[:19].replace('T',' ')+' — '+labels.get(e['status'],e['status'])+': '+explanation(e['reason'])[:160] for e in reversed(review['events']))
             values.append([labels.get(status,status),partner.get('title') or partner.get('username') or 'Закрытый канал',url,
                            snapshot.get('text','')[:3000],explanation(review['opened_reason']),local(snapshot.get('published_at'),tz),local(review['opened_at'],tz),
                            local(review['checked_at'],tz),explanation(review['reason']),next_try,events,review['id']])

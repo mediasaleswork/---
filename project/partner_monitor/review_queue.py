@@ -102,7 +102,7 @@ def export_sheet(sheet,partners,timezone_name):
         if sheet.cell(row,1).value=='Нужна ручная проверка':sheet.cell(row,1).fill=PatternFill('solid',fgColor='FFF1CC')
     for col,width in {'A':25,'B':24,'C':28,'D':64,'E':44,'F':21,'G':21,'H':21,'I':46,'J':28,'K':58,'L':12}.items():sheet.column_dimensions[col].width=width
     sheet.column_dimensions['L'].hidden=True
-    sheet.freeze_panes='D2';sheet.print_title_rows='1:1'
+    sheet.freeze_panes='A2';sheet.print_title_rows='1:1'
     if len(values)>1:
         table=Table(displayName='ManualReview',ref=sheet.dimensions)
         table.tableStyleInfo=TableStyleInfo(name='TableStyleLight1',showRowStripes=True);sheet.add_table(table)

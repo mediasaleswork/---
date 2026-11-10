@@ -111,6 +111,7 @@ class Sheets:
         if new_scripts:
             writes.append({"range":f"'Скрипты'!A{len(scripts)+1}:F{len(scripts)+len(new_scripts)}", "values":new_scripts})
         structure = []
+        publication_sort=None
         if meta.get('sheets'):
             publication_sheet=self.publication_sheet(meta)
             sid=publication_sheet['properties']['sheetId']
@@ -125,6 +126,7 @@ class Sheets:
             if len(posted)+len(additions)>=5000:raise ValueError('Publication capacity reached')
             if additions:
                 end=len(posted)+len(additions)
+                publication_sort={'sortRange':{'range':{'sheetId':sid,'startRowIndex':1,'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':6},'sortSpecs':[{'dimensionIndex':1,'sortOrder':'DESCENDING'}]}}
                 writes.append({'range':f"'Публикации'!A{len(posted)+1}:F{end}",'values':additions})
                 structure.extend([
                     {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':len(posted),'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':6},'cell':{'userEnteredFormat':{'wrapStrategy':'WRAP','verticalAlignment':'TOP','textFormat':{'fontFamily':'Arial','fontSize':11}}},'fields':'userEnteredFormat'}},
@@ -157,5 +159,6 @@ class Sheets:
             {"range":"'Работа агента'!B8:C8", "values":[['Обновлено UTC',datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')]]}])
         # RAW means source text beginning with '=' is never executed as a formula.
         self.api("POST", "/values:batchUpdate", json={"valueInputOption":"RAW", "data":writes})
+        if publication_sort:self.api('POST',':batchUpdate',json={'requests':[publication_sort]})
         store.set_state("last_synced", __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
         return len(new_leads)

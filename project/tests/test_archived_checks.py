@@ -7,6 +7,8 @@ import test_campaigns as base
 import test_campaign_queue as queue
 from test_engine import message,NOW
 from partner_monitor.archived_checks import saved_caption
+from partner_monitor.archived_checks import recover_forwarded_captions
+from telethon import types
 
 
 class ArchivedTests(IsolatedAsyncioTestCase):
@@ -75,3 +77,23 @@ class ArchivedTests(IsolatedAsyncioTestCase):
             self.store.set_state('campaign_next_request_at','')
             await self.monitor.campaign_worker.process()
         self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'archived_no_match')
+
+    async def test_exact_forwarded_source_copy_recovers_missing_caption(self):
+        await self.prepare_archive()
+        self.store.execute("UPDATE campaign_checks SET status='unavailable',candidate_snapshot=''")
+        copy=self.client.histories[100][0]
+        copy.message='Сохранённая пересылка содержит исходный текст публикации и сведения об объявлении.'
+        copy.fwd_from=types.MessageFwdHeader(date=NOW,from_id=types.PeerChannel(200),channel_post=7)
+        await recover_forwarded_captions(self.monitor.campaign_worker)
+        value=json.loads(self.store.rows('SELECT candidate_snapshot FROM campaign_checks')[0]['candidate_snapshot'])
+        self.assertEqual(value['archive_method'],'verified_telegram_forward')
+        self.assertEqual(value['forward_copy_message_id'],1)
+        self.assertEqual(value['text'],copy.message)
+        self.assertFalse(self.store.rows('SELECT * FROM posts'))
+
+    async def test_forward_from_another_channel_is_never_attached(self):
+        await self.prepare_archive()
+        self.store.execute("UPDATE campaign_checks SET status='unavailable',candidate_snapshot=''")
+        self.client.histories[100][0].fwd_from=types.MessageFwdHeader(date=NOW,from_id=types.PeerChannel(999),channel_post=7)
+        await recover_forwarded_captions(self.monitor.campaign_worker)
+        self.assertEqual(self.store.rows('SELECT candidate_snapshot FROM campaign_checks')[0]['candidate_snapshot'],'')

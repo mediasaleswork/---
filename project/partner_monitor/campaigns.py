@@ -355,6 +355,8 @@ class CampaignWorker:
             return
         from .campaign_queue import maintain_queue,process_batch
         maintain_queue(self)
+        from .archived_checks import recover_forwarded_captions
+        await recover_forwarded_captions(self)
         if callable(getattr(type(self.judge),'compare_many',None)):
             await process_batch(self)
             return

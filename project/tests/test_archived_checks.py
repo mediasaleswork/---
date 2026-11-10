@@ -46,6 +46,16 @@ class ArchivedTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'review')
         self.assertFalse(self.store.rows('SELECT * FROM posts'))
 
+    async def test_scope_pause_during_archival_request_keeps_original_job(self):
+        await self.prepare_archive()
+        def response(content):
+            self.monitor.scope_ready=False
+            return base.decision(None,'different_campaign')
+        with patch.object(queue.BatchJudge,'compare_archived',create=True,side_effect=response):
+            await self.monitor.campaign_worker.process()
+        self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'pending')
+        self.assertFalse(self.store.rows('SELECT * FROM posts'))
+
     async def test_archived_rejection_is_not_sent_again_on_each_availability_retry(self):
         await self.prepare_archive()
         with patch.object(queue.BatchJudge,'compare_archived',create=True,return_value=base.decision(None,'different_campaign')) as compare:

@@ -106,6 +106,11 @@ def budget(worker):
 
 
 def defer(worker,jobs,code):
+    if code in {'request_timeout','network_unavailable','http_500','http_502','http_503','http_504'}:
+        failures=int(worker.store.state('campaign_service_failures'))+1
+        worker.store.set_state('campaign_service_failures',failures)
+        pause=min(300,30*2**min(failures-1,4))
+        worker.store.set_state('campaign_service_retry_at',(datetime.now(timezone.utc)+timedelta(seconds=pause)).isoformat())
     if code=='http_429':
         retry=(datetime.now(timezone.utc)+timedelta(minutes=15)).isoformat()
         worker.store.set_state('campaign_quota_retry_at',retry)
@@ -122,7 +127,7 @@ async def process_batch(worker):
     try:
         for _ in range(worker.config.campaign_batch_size):
             now=utcnow()
-            ai_ready=store.state('campaign_quota_retry_at','')<=now and store.state('campaign_next_request_at','')<=now and budget(worker)
+            ai_ready=store.state('campaign_quota_retry_at','')<=now and store.state('campaign_service_retry_at','')<=now and store.state('campaign_next_request_at','')<=now and budget(worker)
             jobs=store.rows("""SELECT j.* FROM campaign_checks j JOIN partners p ON p.id=j.partner_id
               WHERE p.status='active' AND j.status IN ('pending','error','unavailable','archived_no_match')
               AND j.next_try_at<=? ORDER BY j.priority DESC,j.created_at,j.id LIMIT 1000""",(now,))
@@ -212,6 +217,8 @@ async def process_batch(worker):
                 if not isinstance(values,dict) or set(values)!={j['id'] for j,_,_ in ready}:raise CampaignAPIError('incomplete_batch_response')
                 # Validate the whole response before committing ANY verdict.
                 verdicts={key:validate_decision(value,[p['id'] for p in placements]) for key,value in values.items()}
+                store.set_state('campaign_service_failures',0)
+                store.set_state('campaign_service_retry_at','')
                 refreshed=await worker.monitor.client.get_messages(entity,ids=ids)
                 by_id={m.id:m for m in refreshed if isinstance(m,types.Message)}
                 if not getattr(worker.monitor,'scope_ready',True):

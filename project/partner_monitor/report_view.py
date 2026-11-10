@@ -87,6 +87,10 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
             picture_note = ("Карточка закрытого поста из данных Telegram. " + picture_note).strip()
         if post.get("evidence_note"):
             picture_note = (post["evidence_note"] + " " + picture_note).strip()
+        if picture:
+            measurement=next((job for job in post.get('measurement_jobs',[]) if job['due_key']==picture.get('due_key') and job['status']=='done'),None)
+            if measurement and measurement.get('last_error'):
+                picture_note=(picture_note+' '+measurement['last_error']).strip()
         record = {"id": post["id"], "client": "; ".join(clients), "channel": partner.get("title") or partner.get("username") or "Канал не указан",
             "channel_url": f"https://t.me/{partner['username']}" if partner.get("username") else partner.get("source_url") or "",
             "languages": ", ".join(sorted({b["language"] for b in briefs if b.get("language")})),

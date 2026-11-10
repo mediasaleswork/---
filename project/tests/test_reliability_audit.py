@@ -68,6 +68,23 @@ class CampaignRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'pending')
         self.assertFalse(self.store.rows('SELECT * FROM posts'))
 
+    async def test_provider_outage_pauses_other_requests_without_losing_queue(self):
+        from partner_monitor.campaigns import CampaignAPIError
+        self.batch();await self.queue_only()
+        self.judge.failure=CampaignAPIError('http_503')
+        await self.monitor.campaign_worker.process()
+        self.assertTrue(self.store.state('campaign_service_retry_at',''))
+        self.store.execute("UPDATE campaign_checks SET next_try_at='2000-01-01T00:00:00+00:00'")
+        self.store.set_state('campaign_next_request_at','')
+        await self.monitor.campaign_worker.process()
+        self.assertEqual(len(self.judge.calls),1)
+        self.store.set_state('campaign_service_retry_at','')
+        self.judge.failure=None
+        await self.monitor.campaign_worker.process()
+        self.assertEqual(len(self.judge.calls),2)
+        self.assertEqual(self.store.state('campaign_service_failures'),'0')
+        self.assertEqual(len(self.store.rows('SELECT * FROM posts')),1)
+
     async def test_batch_closes_finished_search_only_after_negative_verdict(self):
         self.batch();await self.queue_only()
         self.store.execute('UPDATE placements SET scan_complete=1')
@@ -237,6 +254,9 @@ class MeasurementRecoveryTests(unittest.IsolatedAsyncioTestCase):
         due=self.store.rows("SELECT due_at FROM measurement_jobs WHERE due_key='20h'")[0]['due_at']
         self.assertEqual(due,(published+timedelta(hours=20)).isoformat())
         self.assertEqual(current_picture(checks)['screenshot_path'],str(second))
+        from partner_monitor.report_view import build_view
+        view=build_view(*self.store.dump())
+        self.assertIn('задержкой',view['records'][0]['picture_note'])
         self.assertTrue(first.is_file())
         self.assertEqual(self.store.rows("SELECT status FROM measurement_jobs WHERE due_key='24h'")[0]['status'],'superseded')
         self.store.execute("UPDATE measurement_jobs SET due_at=? WHERE due_key='48h'",((engine.NOW-timedelta(minutes=1)).isoformat(),))

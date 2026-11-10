@@ -96,6 +96,10 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
     store.execute('UPDATE campaign_checks SET attempts=attempts+1 WHERE id=?',(job['id'],))
     decision=await asyncio.to_thread(worker.judge.compare_archived,content)
     result=validate_decision(decision,[p['id'] for p in placements])
+    store.set_state('campaign_service_failures',0)
+    store.set_state('campaign_service_retry_at','')
+    if not getattr(worker.monitor,'scope_ready',True):
+        return 'requested'
     _,latest=current(worker,job)
     latest_job=store.rows('SELECT candidate_snapshot FROM campaign_checks WHERE id=?',(job['id'],))
     if not latest or not latest_job or latest_job[0]['candidate_snapshot']!=job['candidate_snapshot']:
@@ -103,6 +107,8 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
         return 'requested'
     returned=await worker.monitor.client.get_messages(entity,ids=json.loads(job['message_ids']))
     returned=sorted([m for m in returned if isinstance(m,types.Message)],key=lambda m:m.id)
+    if not getattr(worker.monitor,'scope_ready',True):
+        return 'requested'
     if len(returned)==len(json.loads(job['message_ids'])):
         worker.finish(job,'obsolete','Публикация снова доступна; проверим текущую версию')
         enqueue(store,worker.config,partner,returned,latest)

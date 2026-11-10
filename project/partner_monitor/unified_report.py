@@ -95,8 +95,9 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     put(report, 4, 1, f"Время: {timezone}" if compact else f"Период публикаций: {month or 'все даты'}. Время: {timezone}. Заказано, опубликовано и осталось — за весь срок заявки.")
     report.merge_cells("A5:L5")
     pending=sum(r['n'] for p in partners for r in p.get('campaign_queue',[]) if r['status'] in {'pending','error'})
-    unknown={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) }
-    queue_note=f"Ожидают распознавания: {pending}. Не удалось повторно открыть: {len(unknown)} (не засчитаны; см. «Недоступные посты»)." if any('campaign_queue' in p for p in partners) else ''
+    unknown={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status','unavailable')=='unavailable' }
+    review={ (p['id'],j['message_ids']) for p in partners for j in p.get('campaign_checks',[]) if j.get('status')=='review' }
+    queue_note=f"Ожидают распознавания: {pending}. Недоступны: {len(unknown)}. Нужна сверка: {len(review)} (не засчитаны; см. «Недоступные посты»)." if any('campaign_queue' in p for p in partners) else ''
     put(report, 5, 1, note or queue_note or ('' if compact else "Пример: заказано 10 постов, опубликовано 4, осталось 6. Пустое количество — заказ не указан полностью. Не удалось открыть пост — не значит, что он удалён."))
     report.row_dimensions[5].height = 30
     band(report, 7, "СВОДКА ПО ПЛОЩАДКАМ")
@@ -280,10 +281,11 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
             mid=min(json.loads(job['message_ids']))
             url=f"https://t.me/{partner['username']}/{mid}" if partner.get('username') else f"https://t.me/c/{partner.get('channel_id')}/{mid}"
             info=json.loads(job.get('candidate_snapshot') or '{}')
-            reason=job['reason']+' Повтор: '+shown_time(local(job['next_try_at'],tz))+'.'
+            needs_review=job.get('status')=='review'
+            reason=job['reason']+(' Требуется проверка совпадения.' if needs_review else ' Повтор: '+shown_time(local(job['next_try_at'],tz))+'.')
             waiting.append((job,info))
             unavailable_rows.append(['Не подтверждено',partner.get('title') or partner.get('username'),url,
-                'Не засчитано — проверка доступности',None,None,None,info.get('views'),'',reason])
+                'Не засчитано — нужна сверка' if needs_review else 'Не засчитано — проверка доступности',None,None,None,info.get('views'),'',reason])
     _write_table(unavailable, unavailable_rows)
     for row, item in enumerate(view["unavailable"], 2):
         date_cell(unavailable, row, 5, item["published"])
@@ -293,6 +295,8 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     for row,(job,info) in enumerate(waiting,start=2+len(view['unavailable'])):
         date_cell(unavailable,row,5,local(info.get('published_at'),tz))
         date_cell(unavailable,row,6,local(job.get('checked_at'),tz))
+        unavailable.row_dimensions[row].height=78
+        if info.get('text'):unavailable.cell(row,4).comment=Comment('Сохранённый текст публикации:\n'+info['text'][:12000],'Partner Monitor')
     _write_table(history_sheet, history)
     post_by_id = {p["id"]: p for p in filtered_posts}
     for row, snap in enumerate(_ordered(filtered_snapshots), 2):

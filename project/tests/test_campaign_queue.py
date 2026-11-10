@@ -142,12 +142,14 @@ class BatchProtocolTests(TestCase):
         partner=fixture.partners[0]
         check={'message_ids':'[999]','reason':'Telegram не вернул публикацию','checked_at':'2026-11-10T09:00:00+00:00',
             'next_try_at':'2026-11-10T09:05:00+00:00','availability_attempts':1,'candidate_snapshot':''}
-        partner['campaign_checks']=[check,dict(check)]
+        partner['campaign_checks']=[check,dict(check),dict(check,message_ids='[1000]',status='review',reason='Нужно уточнить материал')]
         partner['campaign_queue']=[{'status':'pending','n':8},{'status':'unavailable','n':2}]
         path=export_unified(fixture.partners,fixture.posts,fixture.snapshots,fixture.root/'queue.xlsx',compact=True)
         book=load_workbook(path);self.addCleanup(book.close)
         self.assertIn('Ожидают распознавания: 8',book['Отчёт']['A5'].value)
         rows=[row for row in book['Недоступные посты'].iter_rows(values_only=True) if row[0]=='Не подтверждено']
-        self.assertEqual(len(rows),1)
+        self.assertEqual(len(rows),2)
         self.assertEqual(rows[0][3],'Не засчитано — проверка доступности')
+        self.assertEqual(rows[1][3],'Не засчитано — нужна сверка')
+        self.assertIn('Нужна сверка: 1',book['Отчёт']['A5'].value)
         self.assertEqual(book['Реестр публикаций'].max_row,len(fixture.posts)+1)

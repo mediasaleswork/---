@@ -169,5 +169,9 @@ def sync_compact(reporter, partners, posts, snapshots):
         link("Отчёт",anchors[post["id"]],1,"Реестр публикаций",f"A{i}")
     for i,record in enumerate(view["unavailable"],2):
         link("Недоступные посты",i,9,"Отчёт",f"A{anchors[record['id']]}")
+    from .review_queue import ordered_reviews,original_missing,saved_snapshot
+    for row,(_,review) in enumerate(ordered_reviews(partners),2):
+        if original_missing(review) and saved_snapshot(review).get('text'):
+            link('Ручная проверка',row,3,'Ручная проверка',f'D{row}')
     reporter._json("POST", base + ":batchUpdate", json={"requests":requests})
     return links

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import test_campaign_queue as queue
 import test_campaign_throughput as throughput
 import test_campaigns as base
-from partner_monitor.review_queue import reconcile
+from partner_monitor.review_queue import reconcile,export_sheet,saved_snapshot
 from partner_monitor.unified_report import export_unified
 
 
@@ -108,3 +108,42 @@ class ReviewTests(unittest.IsolatedAsyncioTestCase):
         before=self.store.rows('SELECT COUNT(*) n FROM campaign_review_events')[0]['n']
         reconcile(self.store);reconcile(self.store)
         self.assertEqual(self.store.rows('SELECT COUNT(*) n FROM campaign_review_events')[0]['n'],before)
+
+
+def review_fixture(job_id,status,text='Сохранённый текст',opened='2026-11-10T10:00:00+00:00'):
+    return dict(id=job_id,status=status,message_ids='[17]',candidate_snapshot=json.dumps({'text':text}),
+                original_snapshot='{}',decision='',opened_at=opened,opened_reason='Причина',checked_at=opened,
+                next_try_at=opened,reason='Проверка',events=[])
+
+
+class ReviewLinkTests(unittest.TestCase):
+    def test_saved_text_survives_invalid_or_empty_current_snapshot(self):
+        for candidate in ('{','{}','[]','{"text":"","views":20}'):
+            with self.subTest(candidate=candidate):
+                value=saved_snapshot({'original_snapshot':'{"text":"Исходный текст","views":10}',
+                                      'candidate_snapshot':candidate})
+                self.assertEqual(value['text'],'Исходный текст')
+        self.assertEqual(value['views'],20)
+
+    def test_unavailable_actions_use_archive_and_active_rows_precede_old_channels(self):
+        from openpyxl import Workbook,load_workbook
+        from io import BytesIO
+        partners=[dict(username='old',manual_reviews=[review_fixture('archive','archived_no_match'),
+            review_fixture('empty','unavailable',text='')]),dict(username='live',manual_reviews=[
+                review_fixture('live','local_checked',opened='2026-11-09T10:00:00+00:00')])]
+        book=Workbook();sheet=book.active;sheet.title='Ручная проверка'
+        export_sheet(sheet,partners,'Asia/Tashkent')
+        output=BytesIO();book.save(output);book.close();output.seek(0)
+        book=load_workbook(output);self.addCleanup(book.close);sheet=book['Ручная проверка']
+        self.assertEqual(sheet['L2'].value,'live')
+        self.assertEqual(sheet['C2'].hyperlink.target,'https://t.me/live/17')
+        archive=next(row for row in range(3,5) if sheet.cell(row,12).value=='archive')
+        empty=next(row for row in range(3,5) if sheet.cell(row,12).value=='empty')
+        self.assertEqual(sheet.cell(archive,3).value,'Читать сохранённый текст')
+        self.assertEqual(sheet.cell(archive,3).hyperlink.location,f"'Ручная проверка'!D{archive}")
+        self.assertIsNone(sheet.cell(archive,3).hyperlink.target)
+        self.assertEqual(sheet.cell(archive,4).value,'Сохранённый текст')
+        self.assertEqual(sheet.cell(archive,13).value,'https://t.me/old/17')
+        self.assertIsNone(sheet.cell(empty,3).hyperlink)
+        self.assertIn('текста нет',sheet.cell(empty,3).value)
+        self.assertTrue(sheet.column_dimensions['L'].hidden)

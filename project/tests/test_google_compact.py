@@ -1,12 +1,11 @@
 from io import BytesIO
-import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
 from openpyxl import load_workbook
 
-from partner_monitor.google_compact import REPORT_SHEETS, MARKER, VALUE, SHEETS, replace_workbook, sync_compact, verify_target, verify_history_preserved
+from partner_monitor.google_compact import REPORT_SHEETS, MARKER, VALUE, SHEETS, replace_workbook, verify_target
 from partner_monitor.reports import GoogleReporter
 import test_unified_report
 
@@ -103,6 +102,22 @@ class CompactGoogleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'ручной проверки'):
                 self.reporter.sync([],[],[])
             replace.assert_not_called()
+
+    def test_unavailable_review_links_follow_current_gid_and_sorted_row(self):
+        from test_review_queue import review_fixture
+        self.data.partners[0]['manual_reviews']=[review_fixture('archived','archived_no_match'),
+                                               review_fixture('active','local_checked')]
+        self.reporter._json=self.metadata;self.reporter._upload=Mock(return_value=None)
+        with patch('partner_monitor.google_compact.replace_workbook'):
+            self.reporter.sync(self.data.partners,self.data.posts,self.data.snapshots)
+        request=next(c[2]['json'] for c in self.calls if c[1].endswith(':batchUpdate'))
+        gid=REPORT_SHEETS.index('Ручная проверка')
+        links=[r['repeatCell'] for r in request['requests'] if 'repeatCell' in r and
+               r['repeatCell']['range']['sheetId']==gid]
+        self.assertEqual(len(links),1)
+        self.assertEqual(links[0]['range']['startRowIndex'],2)
+        self.assertEqual(links[0]['cell']['userEnteredFormat']['textFormat']['link']['uri'],
+                         f'https://docs.google.com/spreadsheets/d/dedicated-test/edit#gid={gid}&range=D3')
 
     def test_legacy_five_tab_report_can_migrate_to_review_tab(self):
         from partner_monitor.google_compact import LEGACY_REPORT_SHEETS

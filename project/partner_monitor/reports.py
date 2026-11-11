@@ -93,8 +93,10 @@ def _google_date(value, timezone):
 def _google_tables(partners, posts, snapshots, timezone):
     from .report_view import build_view
 
-    publications, history, briefs, by_post = _tables(partners, posts, snapshots, timezone)
     view = build_view(partners, posts, snapshots, timezone)
+    posts_by_id = {post["id"]:post for post in posts}
+    posts = [posts_by_id[row["id"]] for row in view["records"]]
+    publications, history, briefs, by_post = _tables(partners, posts, snapshots, timezone)
     record_by_id = {row["id"]: row for row in view["records"]}
     brief_by_id = {b["id"]: b for p in partners for b in p.get("placements", [])}
     best = {}

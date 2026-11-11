@@ -114,8 +114,13 @@ def _enqueue(store, config, partner, messages, placements):
     archive=getattr(store,'candidate_archive',None)
     if archive:archive.observe(partner,messages,candidate)
     # Already attributed publications keep their evidence and original count.
-    existing = store.rows("SELECT message_ids FROM posts WHERE partner_id=?", (partner["id"],))
-    if any(set(ids).intersection(json.loads(p["message_ids"])) for p in existing):
+    existing = {row['message_id']:row['id'] for row in store.recorded_members(partner,messages)}
+    for message in messages:
+        if message.id in existing:
+            from .message_content import message_content
+            store.execute('UPDATE posts SET text=?,telegram_channel_id=? WHERE id=?',
+                          (message_content(message).text,message.peer_id.channel_id,existing[message.id]))
+    if all(mid in existing for mid in ids):
         return
     source = source_signature(placements, model_identity(config))
     ident = digest([partner["id"], ids, source, candidate])
@@ -140,6 +145,7 @@ def _enqueue(store, config, partner, messages, placements):
         (ident, partner["id"], packed(ids), packed(sorted(p["id"] for p in placements)), source, candidate, stamp, stamp, priority,snapshot))
     for placement in placements:
         store.execute("UPDATE placements SET status='watching' WHERE id=? AND status='not_found'",(placement['id'],))
+    return ident
 
 
 def validate_decision(value, campaign_ids):

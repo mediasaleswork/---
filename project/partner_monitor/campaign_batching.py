@@ -161,8 +161,7 @@ async def prepare(worker, group, ai_ready, offline=''):
                 worker.finish(job, 'obsolete', 'Публикация отредактирована; проверим новую версию')
                 enqueue(worker.store, worker.config, partner, messages, own)
                 continue
-            recorded = worker.store.rows('SELECT message_ids FROM posts WHERE partner_id=?', (partner['id'],))
-            if any(set(m.id for m in messages) & set(json.loads(p['message_ids'])) for p in recorded):
+            if len(worker.store.recorded_members(partner,messages))==len(messages):
                 worker.finish(job, 'obsolete', 'Публикация уже учтена')
                 continue
             actual = combined_content(messages)

@@ -41,7 +41,8 @@ def creative_cues(text, brief, fields):
 
 
 class ConversationIntake:
-    def __init__(self, store, config):
+    def __init__(self, store, config, *, historical=False):
+        self.historical=historical
         self.store, self.config = store, config
 
     def _draft(self, ident):
@@ -120,7 +121,8 @@ class ConversationIntake:
                packed(direct_ids), "needs_review" if reason else "watching", reason,
                int(brief.default_window), utcnow(), draft["client_name"], draft["language"] or (plans[0].get("language", "") if plans else ""),
                draft["media_keys"], draft["id"], plans[0]["contract"] if len(plans) == 1 else ""))
-            self.store.execute("UPDATE partners SET last_message_id=0 WHERE id=?", (pid,))
+            if not self.historical:
+                self.store.execute("UPDATE partners SET last_message_id=0 WHERE id=?", (pid,))
         return list(dict.fromkeys(issues))
 
     def consume(self, chat, message, content, refs):
@@ -252,7 +254,8 @@ class ConversationIntake:
         media = packed(content.media)
         cutoff = (message.date - timedelta(days=self.config.default_window_days)).isoformat()
         identical = self.store.rows("""SELECT * FROM intake_drafts WHERE source_chat_id=? AND creative_text=?
-          AND media_keys=? AND status='approved' AND created_at>=? ORDER BY id DESC LIMIT 1""", (str(chat), text, media, cutoff))
+          AND media_keys=? AND status='approved' AND created_at BETWEEN ? AND ? ORDER BY created_at DESC,id DESC LIMIT 1""",
+          (str(chat), text, media, cutoff,message.date.isoformat()))
         if identical:
             draft = identical[0]
             new = [name for name in targets if name not in json.loads(draft["target_refs"])]

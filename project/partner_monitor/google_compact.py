@@ -151,8 +151,7 @@ def sync_compact(reporter, partners, posts, snapshots):
     # Excel's internal links reference sheet names. After conversion, bind them
     # to the actual Google sheet IDs so navigation still works after replacement.
     gids = {s["properties"]["title"]:s["properties"]["sheetId"] for s in sheets}
-    partner_ids = {p["id"]:p["partner_id"] for p in posts}
-    ordered = sorted(view["records"], key=lambda p:(p["client"].casefold(),p["channel"].casefold(),partner_ids[p["id"]],p["published"],p["id"]))
+    ordered = view["records"]
     start = max(8,8+len(view["summary"]))+6
     anchors = {p["id"]:start+i for i,p in enumerate(ordered)}
     def link(sheet,row,col,target,address):
@@ -163,7 +162,7 @@ def sync_compact(reporter, partners, posts, snapshots):
     for i,group in enumerate(view["summary"],9):
         if group["first_post_id"] in anchors:
             link("Отчёт",i,12,"Отчёт",f"A{anchors[group['first_post_id']]}")
-    selected=[p for p in posts if p["id"] in anchors]
+    selected=ordered
     for i,post in enumerate(selected,2):
         link("Реестр публикаций",i,9,"Отчёт",f"A{anchors[post['id']]}")
         link("Отчёт",anchors[post["id"]],1,"Реестр публикаций",f"A{i}")

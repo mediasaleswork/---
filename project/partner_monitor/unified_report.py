@@ -34,7 +34,8 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     view = build_view(partners, posts, snapshots, timezone, month)
     tz = ZoneInfo(timezone)
     selected = {p["id"] for p in view["records"]}
-    filtered_posts = [p for p in posts if p["id"] in selected]
+    posts_by_id = {p["id"]:p for p in posts}
+    filtered_posts = [posts_by_id[r["id"]] for r in view["records"]]
     filtered_snapshots = [s for s in snapshots if s["post_id"] in selected]
     registry, history, briefs, _ = _tables(partners, filtered_posts, filtered_snapshots, timezone)
     book = Workbook()
@@ -187,8 +188,7 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
     record_by_id = {r["id"]: r for r in view["records"]}
     registry_rows = {p["id"]: i + 2 for i, p in enumerate(filtered_posts)}
     partner_ids = {p["id"]: p["partner_id"] for p in filtered_posts}
-    records = sorted(view["records"], key=lambda p: (p["client"].casefold(), p["channel"].casefold(),
-                                                    partner_ids[p["id"]], p["published"], p["id"]))
+    records = view["records"]
     previous_group = None
     group_number = -1
     for item in records:

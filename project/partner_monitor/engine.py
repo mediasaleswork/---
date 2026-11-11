@@ -137,12 +137,20 @@ class Monitor:
         if placements and self.config.campaign_matching:
             from .campaigns import candidate_signature
             self.store.candidate_archive.observe(partner,members,candidate_signature(members))
+        if self.config.campaign_matching:
+            ids=[]
+            for message in members:
+                ids.append(await self._record_members(partner,[message],reason,placements))
+            return ids[0]
+        return await self._record_members(partner,members,reason,placements)
+
+    async def _record_members(self,partner,members,reason,placements):
         anchor = members[0]
-        key = (partner["id"], getattr(anchor, "grouped_id", None) or f"m:{anchor.id}")
+        key = (anchor.peer_id.channel_id,anchor.id) if self.config.campaign_matching else (partner["id"], getattr(anchor,"grouped_id",None) or f"m:{anchor.id}")
         lock = self._post_locks.setdefault(key, asyncio.Lock())
         async with lock:
             target = partner["username"] or f"c/{members[0].peer_id.channel_id}"
-            post_id = self.store.save_post(partner["id"], members, reason, target)
+            post_id = self.store.save_post(partner["id"], members, reason, target,separate=self.config.campaign_matching)
             post = self.store.rows("SELECT * FROM posts WHERE id=?", (post_id,))[0]
             ensure_jobs(self.store, post, self.config.milestones_hours)
             self.store.execute("UPDATE posts SET last_checked_at=?,unavailable_since=NULL,status='active',last_error=NULL WHERE id=?", (utcnow(), post_id))
@@ -173,6 +181,11 @@ class Monitor:
         for partner in partners:
             if not self.config.permits(PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id"))):
                 continue
+            if self.config.campaign_matching:
+                known={p['message_id']:p['id'] for p in self.store.recorded_members(partner,messages)}
+                for m in messages:
+                    if m.id in known:
+                        self.store.execute('UPDATE posts SET text=?,telegram_channel_id=? WHERE id=?',(message_content(m).text,channel_id,known[m.id]))
             placements = self.store.rows("SELECT * FROM placements WHERE partner_id=?", (partner["id"],))
             matched = []
             reason = ""
@@ -600,6 +613,8 @@ async def run(config: Config, *, once: bool = False):
                         archive=store.candidate_archive
                         archivers=[asyncio.create_task(archive.run(realtime=True)),asyncio.create_task(archive.run()),
                                    asyncio.create_task(archive.run(text_only=True)),asyncio.create_task(archive.run(upload=True))]
+                        from .history_scan import history_loop
+                        archivers.append(asyncio.create_task(history_loop(monitor)))
                         from .campaigns import campaign_loop
                         campaign_task = asyncio.create_task(campaign_loop(monitor))
                 try:

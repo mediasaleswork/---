@@ -109,6 +109,15 @@ class Store(AbstractContextManager):
           asset TEXT NOT NULL REFERENCES candidate_files(key),PRIMARY KEY(partner_id,signature,position));
         CREATE INDEX IF NOT EXISTS archive_origins ON candidate_parts(asset);
         CREATE TABLE IF NOT EXISTS candidate_fast(asset TEXT PRIMARY KEY REFERENCES candidate_files(key),seen TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS history_pages(
+          run TEXT NOT NULL,peer INTEGER NOT NULL,partner_id INTEGER,cursor INTEGER NOT NULL DEFAULT 0,
+          done INTEGER NOT NULL DEFAULT 0,checked TEXT NOT NULL DEFAULT '',retry TEXT NOT NULL DEFAULT '',
+          error TEXT NOT NULL DEFAULT '',PRIMARY KEY(run,peer));
+        CREATE TABLE IF NOT EXISTS history_seen(
+          run TEXT NOT NULL,peer INTEGER NOT NULL,mid INTEGER NOT NULL,published TEXT NOT NULL,
+          PRIMARY KEY(run,peer,mid));
+        CREATE TABLE IF NOT EXISTS history_checks(
+          run TEXT NOT NULL,job TEXT NOT NULL,PRIMARY KEY(run,job));
         CREATE TABLE IF NOT EXISTS source_revisions (
           source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, revision_hash TEXT NOT NULL,
           payload TEXT NOT NULL, recorded_at TEXT NOT NULL,
@@ -122,7 +131,7 @@ class Store(AbstractContextManager):
         for table, additions in {
             "placements": {"client_name": "TEXT NOT NULL DEFAULT ''", "language": "TEXT NOT NULL DEFAULT ''", "planned_posts": "INTEGER",
                            "media_keys": "TEXT NOT NULL DEFAULT '[]'", "draft_id": "INTEGER", "contract_key": "TEXT NOT NULL DEFAULT ''"},
-            "posts": {"last_checked_at": "TEXT", "unavailable_since": "TEXT"},
+            "posts": {"last_checked_at": "TEXT", "unavailable_since": "TEXT", "telegram_channel_id": "INTEGER"},
             "snapshots": {"next_capture_at": "TEXT"},
             "contract_plans": {"baseline_until": "TEXT"},
             "campaign_checks": {"priority": "INTEGER NOT NULL DEFAULT 0", "availability_attempts": "INTEGER NOT NULL DEFAULT 0", "candidate_snapshot": "TEXT NOT NULL DEFAULT ''", "archive_signature": "TEXT NOT NULL DEFAULT ''", "provisional_decision": "TEXT NOT NULL DEFAULT ''", "provisional_at": "TEXT", "individual_review": "INTEGER NOT NULL DEFAULT 0"},
@@ -131,6 +140,7 @@ class Store(AbstractContextManager):
             for name, declaration in additions.items():
                 if name not in existing:
                     self.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS post_telegram_identity ON posts(telegram_channel_id,message_id) WHERE telegram_channel_id IS NOT NULL")
         self.execute("UPDATE campaign_checks SET individual_review=1 WHERE reason='individual_review' AND individual_review=0")
         if not self.state('campaign_review_register_v1',''):
             from .review_queue import reconcile
@@ -220,13 +230,32 @@ class Store(AbstractContextManager):
            json.dumps(domains) if domains is not None else None, retention_hours, placement_id))
         self.execute("UPDATE partners SET last_message_id=0 WHERE id=(SELECT partner_id FROM placements WHERE id=?)", (placement_id,))
 
-    def save_post(self, partner_id: int, messages: list, reason: str, username: str) -> int:
+    def save_post(self, partner_id: int, messages: list, reason: str, username: str, *, separate=False) -> int:
         messages = sorted(messages, key=lambda m: m.id)
         anchor = messages[0]
         album_key = f"g:{anchor.grouped_id}" if getattr(anchor, "grouped_id", None) else f"m:{anchor.id}"
         from .message_content import combined_content
         text = combined_content(messages).text
         ids = json.dumps([m.id for m in messages])
+        if separate:
+            if len(messages)!=1:
+                raise ValueError("One Telegram message is required per report row")
+            channel=anchor.peer_id.channel_id
+            album_key=f"m:{anchor.id}"
+            with self.transaction():
+                prior=self.rows("""SELECT id FROM posts WHERE message_id=? AND
+                    (telegram_channel_id=? OR (telegram_channel_id IS NULL AND partner_id IN
+                     (SELECT id FROM partners WHERE channel_id=? OR id=?))) ORDER BY id LIMIT 1""",
+                    (anchor.id,channel,channel,partner_id))
+                if prior:
+                    post_id=prior[0]['id']
+                    self.execute("""UPDATE posts SET telegram_channel_id=?,message_ids=?,text=?,published_at=?
+                        WHERE id=?""",(channel,ids,text,anchor.date.isoformat(),post_id))
+                    return post_id
+                cursor=self.execute("""INSERT INTO posts(partner_id,telegram_channel_id,album_key,message_id,message_ids,url,
+                    published_at,first_seen_at,text,match_reason) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (partner_id,channel,album_key,anchor.id,ids,f"https://t.me/{username}/{anchor.id}",anchor.date.isoformat(),utcnow(),text,reason))
+                return cursor.lastrowid
         self.execute("""INSERT INTO posts(partner_id,album_key,message_id,message_ids,url,published_at,first_seen_at,text,match_reason)
           VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(partner_id,album_key) DO UPDATE SET
           message_ids=excluded.message_ids,text=excluded.text,
@@ -234,6 +263,13 @@ class Store(AbstractContextManager):
           match_reason=CASE WHEN posts.match_reason LIKE 'manual:%' THEN posts.match_reason ELSE excluded.match_reason END""",
           (partner_id, album_key, anchor.id, ids, f"https://t.me/{username}/{anchor.id}", anchor.date.isoformat(), utcnow(), text, reason))
         return self.rows("SELECT id FROM posts WHERE partner_id=? AND album_key=?", (partner_id, album_key))[0]["id"]
+
+    def recorded_members(self, partner, messages):
+        ids=[m.id for m in messages]
+        bind=','.join('?' for _ in ids)
+        return self.rows(f"""SELECT id,message_id FROM posts WHERE message_id IN ({bind}) AND
+            (telegram_channel_id=? OR (telegram_channel_id IS NULL AND partner_id=?))""",
+            (*ids,messages[0].peer_id.channel_id,partner['id']))
 
     def add_review(self, chat_id: int | str, message_id: int, filename: str, reason: str):
         self.execute("""INSERT INTO partners(key,title,source_chat_id,source_message_id,added_at,status,last_error)

@@ -104,7 +104,6 @@ class UnifiedReportTests(unittest.TestCase):
         from zipfile import ZipFile
         from openpyxl.utils.units import EMU_to_pixels
 
-        self.posts[0]["published_at"] = "2026-10-01T12:00:00+00:00"
         for size in [(92, 201), (720, 3600), (1400, 200)]:
             with self.subTest(size=size):
                 Image.new("RGB", size, "white").save(self.old)
@@ -135,7 +134,7 @@ class UnifiedReportTests(unittest.TestCase):
                 finally:
                     book.close()
 
-    def test_publication_table_groups_instrument_and_platform_with_matching_images(self):
+    def test_publication_table_orders_by_telegram_date_with_matching_images(self):
         self.partners.append({"id": 2, "title": "Another platform", "username": "partner_two",
                               "status": "active", "placements": [self.brief(3, "Client A", 3)]})
         self.posts.extend([
@@ -150,7 +149,7 @@ class UnifiedReportTests(unittest.TestCase):
             sheet = book["Отчёт"]
             self.assertEqual((sheet["B8"].value, sheet["C8"].value), ("Инструмент", "Площадки"))
             rows = {}
-            for row, post in enumerate(self.posts, 2):
+            for row, post in enumerate(sorted(self.posts, key=lambda p: p["published_at"], reverse=True), 2):
                 link = book["Реестр публикаций"].cell(row, 9).hyperlink
                 address = link.location.rsplit("!", 1)[1]
                 data_row = sheet[address].row
@@ -158,7 +157,7 @@ class UnifiedReportTests(unittest.TestCase):
                 self.assertTrue(sheet.cell(data_row, 5).value.startswith(f"Пост #{post['id']}\n"))
                 self.assertEqual(sheet.cell(data_row, 5).hyperlink.target, post["url"])
                 self.assertEqual(sheet.cell(data_row, 1).hyperlink.location, f"'Реестр публикаций'!A{row}")
-            self.assertEqual(sorted(rows, key=rows.get), [3, 4, 1, 2])
+            self.assertEqual(sorted(rows, key=rows.get), [1, 3, 4, 2])
             self.assertEqual(sorted(rows.values()), list(range(min(rows.values()), min(rows.values()) + 4)))
             self.assertEqual(sheet.cell(rows[1], 1).value, "Client A")
             self.assertEqual(sheet.cell(rows[3], 3).value, "Another platform")

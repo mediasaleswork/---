@@ -51,11 +51,11 @@ class ReportTests(unittest.TestCase):
             for cell in row:
                 if cell.value == "=BAD()":
                     self.assertEqual(cell.data_type, "s")
-        self.assertEqual(registry.cell(2, columns["Текст"]).data_type, "s")
-        self.assertEqual(registry.cell(2, columns["Просмотры"]).value, 1500)
-        self.assertIsNone(registry.cell(3, columns["Просмотры"]).value)
-        self.assertEqual(registry.cell(2, columns["Опубликован"]).value, datetime(2026, 11, 1, 1, 0))
-        self.assertEqual(registry.cell(2, columns["Ссылка на пост"]).hyperlink.target, self.posts[0]["url"])
+        self.assertEqual(registry.cell(3, columns["Текст"]).data_type, "s")
+        self.assertEqual(registry.cell(3, columns["Просмотры"]).value, 1500)
+        self.assertIsNone(registry.cell(2, columns["Просмотры"]).value)
+        self.assertEqual(registry.cell(3, columns["Опубликован"]).value, datetime(2026, 11, 1, 1, 0))
+        self.assertEqual(registry.cell(3, columns["Ссылка на пост"]).hyperlink.target, self.posts[0]["url"])
         self.assertEqual(len(book["Отчёт"]._images), 1)
         self.assertEqual(book["История просмотров"].max_row, 4)
         self.assertEqual(book["Партнёры"].max_row, 3)
@@ -170,10 +170,10 @@ class ReportTests(unittest.TestCase):
         self.snapshots[0]["screenshot_url"] = "https://drive.google.com/file/d/evidence/view"
         self.png.unlink()  # Drive evidence survives removal of the server-local file.
         publications, history, briefs, summary, *_ = _google_tables(self.partners, self.posts, self.snapshots, "Asia/Tashkent")
-        self.assertEqual(publications[1][5], self.snapshots[0]["screenshot_url"])
-        self.assertEqual(publications[1][14:16], ["Instrument One", "UZ"])
-        self.assertIsInstance(publications[1][2], float)
-        self.assertEqual(publications[1][20:22], ["error", "network"])
+        self.assertEqual(publications[2][5], self.snapshots[0]["screenshot_url"])
+        self.assertEqual(publications[2][14:16], ["Instrument One", "UZ"])
+        self.assertIsInstance(publications[2][2], float)
+        self.assertEqual(publications[2][20:22], ["error", "network"])
         self.assertEqual(history[1][-2:], ["Instrument One", "UZ"])
         by_client = {row[0]: row for row in summary[1:]}
         self.assertEqual(by_client["Instrument One"][3:6], [10, 1, 9])
@@ -187,7 +187,7 @@ class ReportTests(unittest.TestCase):
         tables = _google_tables(self.partners, self.posts, self.snapshots, "Asia/Tashkent")
         self.assertIsNone(tables[3][1][3])
         self.assertIsNone(tables[3][1][5])
-        self.assertEqual(tables[0][1][2], (datetime(2026, 11, 1, 1) - datetime(1899, 12, 30)).total_seconds() / 86400)
+        self.assertEqual(tables[0][2][2], (datetime(2026, 11, 1, 1) - datetime(1899, 12, 30)).total_seconds() / 86400)
 
     def test_google_numeric_dates_receive_native_date_formats(self):
         reporter = self.reporter()

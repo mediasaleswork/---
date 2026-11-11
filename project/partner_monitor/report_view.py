@@ -54,7 +54,7 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
             else:
                 group["unknown_plan"] = True
     records = []
-    for post in sorted(posts, key=lambda p: (stamp(p["published_at"]), p["id"])):
+    for post in sorted(posts, key=lambda p: (stamp(p["published_at"]), p["partner_id"], p.get("message_id",p["id"])), reverse=True):
         partner = partner_by_id.get(post["partner_id"], {})
         briefs = [brief_by_id[i] for i in post.get("placement_ids", []) if i in brief_by_id]
         clients = sorted({b.get("client_name") or "Клиент не указан" for b in briefs}) or ["Клиент не указан"]

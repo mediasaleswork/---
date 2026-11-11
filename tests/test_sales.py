@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from datetime import datetime, timezone, timedelta
@@ -228,6 +227,58 @@ class SalesTests(unittest.TestCase):
         writes=sheet.writes[-1]['data']
         self.assertTrue(any(w['range']=="'Лиды'!E2:J2" and w['values'][0][4]==new['source_url'] for w in writes))
         self.assertFalse(any("K2" in w['range'] or "O2" in w['range'] or "'Скрипты'!C2"==w['range'] for w in writes))
+
+    def test_fresh_leads_sort_after_writes_with_all_team_columns(self):
+        old=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)
+        self.store.add_lead(old)
+        second=dict(old,company='SecondBrand',published=(NOW+timedelta(hours=1)).isoformat(),source_url='https://t.me/spotuz/124')
+        self.store.add_lead(second)
+        class Fake(Sheets):
+            def __init__(self):self.calls=[];self.timezone='Asia/Tashkent'
+            def verify(self):return {'sheets':[{'properties':{'sheetId':42,'title':'Лиды','gridProperties':{'columnCount':26}}}]}
+            def publication_sheet(self,meta):return {'properties':{'sheetId':43}}
+            def read(self,name,bounds):
+                if name=='Лиды':return [LEAD_HEADERS,lead_row(old)]
+                if name=='Скрипты':return [SCRIPT_HEADERS]
+                from sales_agent.sheets import PUBLICATION_HEADERS
+                return [PUBLICATION_HEADERS]
+            def api(self,method,path='',**kwargs):self.calls.append((path,kwargs['json']));return {}
+        sheet=Fake();sheet.sync(self.store)
+        sort_call=sheet.calls[-1]
+        sort=next(r['sortRange'] for r in sort_call[1]['requests'] if r['sortRange']['range']['sheetId']==42)
+        self.assertEqual(sort['range'],dict(sheetId=42,startRowIndex=1,endRowIndex=3,startColumnIndex=0,endColumnIndex=26))
+        self.assertEqual(sort['sortSpecs'],[dict(dimensionIndex=5,sortOrder='DESCENDING')])
+        self.assertEqual(sheet.calls[-2][0],'/values:batchUpdate')
+        self.assertEqual(self.store.state('lead_recent_first_v1'),'1')
+        # A team sort remains until a new company or fresher publication arrives.
+        def read(name,bounds):
+            if name=='Лиды':return [LEAD_HEADERS,*[lead_row(l) for l in self.store.leads()]]
+            if name=='Скрипты':return [SCRIPT_HEADERS]
+            from sales_agent.sheets import PUBLICATION_HEADERS
+            return [PUBLICATION_HEADERS]
+        sheet.read=read;sheet.calls=[];sheet.sync(self.store)
+        sorts=[r for path,data in sheet.calls if path==':batchUpdate' for r in data['requests'] if 'sortRange' in r]
+        self.assertFalse(any(r['sortRange']['range']['sheetId']==42 for r in sorts))
+
+    def test_ad_subject_is_not_the_rating_agency_or_ranking(self):
+        examples=[
+            ('Fitch Ratings «Oʻzbektelekom» АКнинг мустақил кредит профилини «bb» даражасига кўтарди. Компаниянинг янги натижалари ҳақида тўлиқ маълумот. Реклама','Oʻzbektelekom'),
+            ('Toşkent amaliy fanlar universiteti THE xalqaro reytingiga kirdi. Times Higher Education (THE) World University Rankings 2027 xalqaro reytingida oliygoh Reporter maqomini oldi. Reklama','Toşkent amaliy fanlar universiteti'),
+            ('Ташкентский университет прикладных наук получил статус Reporter в рейтинге THE World University Rankings 2027. ТАФУ вошёл в число негосударственных вузов (реклама).','Ташкентский университет прикладных наук')]
+        for text,name in examples:
+            row=dict(self.source,text=text,title=text[:180])
+            found=RuleResearcher(['World University','THE World University','Fitch Ratings']).classify([row],NOW)
+            self.assertEqual(len(found),1,text);self.assertEqual(found[0]['company'],name)
+            self.assertIsNotNone(validate(found[0],{row['id']:row},NOW))
+
+    def test_known_language_aliases_share_one_company_and_keep_publications(self):
+        lead=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)
+        for names in [('Uztelecom','Oʻzbektelekom'),('Ташкентский университет прикладных наук','Toşkent amaliy fanlar universiteti','TAFU')]:
+            for index,name in enumerate(names):
+                added=self.store.add_lead(dict(lead,company=name,source_url=f'https://t.me/test/{names[0]}/{index}'))
+                self.assertEqual(added,index==0)
+        self.assertEqual(len(self.store.leads()),2)
+        self.assertEqual(len(self.store.publications()),5)
 
     def test_noncommercial_news_does_not_block_the_persistent_queue(self):
         self.store.add_source(dict(url='https://news.example/exchange',title='Курсы валют',

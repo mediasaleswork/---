@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote,urlsplit
@@ -159,6 +158,18 @@ class Sheets:
             {"range":"'Работа агента'!B8:C8", "values":[['Обновлено UTC',datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')]]}])
         # RAW means source text beginning with '=' is never executed as a formula.
         self.api("POST", "/values:batchUpdate", json={"valueInputOption":"RAW", "data":writes})
-        if publication_sort:self.api('POST',':batchUpdate',json={'requests':[publication_sort]})
+        sorts=[publication_sort] if publication_sort else []
+        lead_sheet=next((s for s in meta.get('sheets',[]) if s['properties']['title']=='Лиды'),None)
+        refreshed=any(w['range'].startswith("'Лиды'!E") for w in writes)
+        if lead_sheet and len(leads)+len(new_leads)>2 and (new_leads or refreshed or not store.state('lead_recent_first_v1')):
+            properties=lead_sheet['properties']
+            # Sort complete rows only after all index-based writes, including CRM and extra team columns.
+            sorts.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,
+                'endRowIndex':len(leads)+len(new_leads),'startColumnIndex':0,
+                'endColumnIndex':properties.get('gridProperties',{}).get('columnCount',17)},
+                'sortSpecs':[{'dimensionIndex':5,'sortOrder':'DESCENDING'}]}})
+        if sorts:
+            self.api('POST',':batchUpdate',json={'requests':sorts})
+        if lead_sheet:store.set_state('lead_recent_first_v1','1')
         store.set_state("last_synced", __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
         return len(new_leads)

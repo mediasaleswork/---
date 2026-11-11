@@ -46,6 +46,16 @@ def is_advertisement(text):
 
 
 def advertising_brand(text,known):
+    # Explicit corporate suffixes and full university names identify the subject
+    # before a rating agency or a World University Rankings title in the same ad.
+    subject_patterns=[
+        r'[«“\"](?P<name>[^»”\"\n]{2,80})[»”\"]\s+(?:АК|АЖ|АО|AJ|AK|JSC|MCHJ|ООО)(?=\b|нинг\b|ning\b)',
+        r'(?P<name>[A-ZÀ-ÖØ-Þ][\w’ʻʼ\x27-]*(?:\s+[a-zà-öø-ÿ][\w’ʻʼ\x27-]*){0,4}\s+universiteti)\b',
+        r'(?P<name>[А-ЯЁ][а-яё]+(?:\s+[а-яё]+){0,2}\s+университет(?:\s+[а-яё]+){0,3})(?=\s+(?:получ|вош|откр|представ)|[.!?])',
+    ]
+    for pattern in subject_patterns:
+        match=re.search(pattern,text[:1000])
+        if match:return match.group('name'),match.start('name'),match.end('name')
     # An explicitly named organiser is preferable to the title of the advertised exhibition.
     organiser=re.search(r'(?i:организован\w*|организатор\w*)\s+(?P<name>'+LATIN+r')',text)
     if organiser:
@@ -59,9 +69,10 @@ def advertising_brand(text,known):
     if recipient:return recipient.group('name'),recipient.start('name'),recipient.end('name')
     # A corporate name is stronger evidence than a named residential project or research index.
     corporate=re.search(r'(?P<name>[A-Z][A-Za-z0-9-]*(?:\s+[A-Z][A-Za-z0-9-]*){0,2}\s+(?:Development|Buildings|Insurance|University))\b',text[:1000])
-    if corporate:return corporate.group('name'),corporate.start('name'),corporate.end('name')
+    if corporate and not re.search(r'\b(?:World University|Rankings)\b',corporate.group('name')):
+        return corporate.group('name'),corporate.start('name'),corporate.end('name')
     for name,start,end in brands(text,known):
-        if name.casefold() in {v.casefold() for v in known} and name not in AD_STOP and not re.search(r'\b(?:Index|Apple Pay)\b',name):
+        if name.casefold() in {v.casefold() for v in known} and name not in AD_STOP and not re.search(r'\b(?:Index|Apple Pay|World University|Rankings)\b',name):
             return name,start,end
     # Inspect the headline before names of interviewees, products and footer links.
     candidates=[]
@@ -69,7 +80,7 @@ def advertising_brand(text,known):
         name=match.group().strip()
         if name in AD_STOP or EXCLUDE.search(name):continue
         name=re.sub(r"['’ʼʻ](?:dan|ning|ni|ga|da)\b.*$",'',name).rstrip("'’ʼʻ")
-        if re.search(r'\b(?:Expo|Marathon|Forum|Olympiad|Index|Apple Pay|Medicine of the Future)\b',name,re.I):continue
+        if re.search(r'\b(?:Expo|Marathon|Forum|Olympiad|Index|Apple Pay|Medicine of the Future|World University|Rankings)\b',name,re.I):continue
         first=name.split()[0]
         if first in AD_STOP:continue
         if first.isupper() and len(first)>=3:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone
 
 
@@ -12,6 +13,12 @@ def stamp():
 
 
 def normalized(value):
+    # These literal names/acronyms are documented together in the source posts.
+    folded=''.join(c for c in unicodedata.normalize('NFKD',value.casefold()) if c.isalnum() and c not in 'ʻʼ')
+    aliases={'ozbektelekom':'uztelecom','узбектелеком':'uztelecom',
+             'toskentamaliyfanlaruniversiteti':'tafu','toshkentamaliyfanlaruniversiteti':'tafu',
+             'ташкентскииуниверситетприкладныхнаук':'tafu','тафу':'tafu'}
+    if folded in aliases:return aliases[folded]
     return re.sub(r"[\W_]+", "", value.casefold())
 
 

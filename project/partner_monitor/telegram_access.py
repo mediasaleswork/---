@@ -29,6 +29,9 @@ class TelegramAccess:
     async def get_entity(self, *args, **kwargs):
         return await self.request(lambda: self.raw.get_entity(*args, **kwargs))
 
+    async def get_entities(self, peers):
+        return await self.request(lambda: self.raw.get_entity(peers))
+
     async def get_messages(self, *args, **kwargs):
         return await self.request(lambda: self.raw.get_messages(*args, **kwargs))
 

@@ -118,7 +118,8 @@ async def prepare(worker, group, ai_ready, offline=''):
         if not partner or partner['status'] != 'active':
             continue
         try:
-            entity = getattr(worker.monitor, 'history_entities', {}).get(partner['channel_id'])
+            entity = (getattr(worker.monitor, 'folder_entities', {}).get(partner['channel_id'])
+                      or getattr(worker.monitor, 'history_entities', {}).get(partner['channel_id']))
             if entity is None:
                 entity = await worker.monitor.client.get_entity(partner['username'] or types.PeerChannel(partner['private_channel_id']))
             if entity.id != partner['channel_id']:

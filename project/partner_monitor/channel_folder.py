@@ -10,7 +10,7 @@ def public_username(entity):
         (u.username for u in getattr(entity, "usernames", None) or [] if u.active), None))
 
 
-async def folder_channels(client, name):
+async def folder_channels(client, name, *, resolved=None):
     result = await client(GetDialogFiltersRequest())
     folders = [f for f in result.filters
                if getattr(getattr(f, "title", None), "text", "").strip().casefold() == name.strip().casefold()]
@@ -19,10 +19,13 @@ async def folder_channels(client, name):
     folder = folders[0]
     excluded = {utils.get_peer_id(p) for p in getattr(folder, "exclude_peers", [])}
     entities = {}
-    for peer in [*folder.pinned_peers, *folder.include_peers]:
-        if utils.get_peer_id(peer) in excluded:
-            continue
-        entity = await client.get_entity(peer)
+    peers = {utils.get_peer_id(p): p for p in [*folder.pinned_peers, *folder.include_peers]
+             if utils.get_peer_id(p) not in excluded}
+    if peers and callable(getattr(type(client), 'get_entities', None)):
+        explicit = await client.get_entities(list(peers.values()))
+    else:
+        explicit = [await client.get_entity(p) for p in peers.values()]
+    for entity in explicit:
         if isinstance(entity, types.Channel) and entity.broadcast:
             entities[entity.id] = entity
     # A custom folder ID is NOT iter_dialogs(folder=ID), which only selects
@@ -42,5 +45,8 @@ async def folder_channels(client, name):
             if getattr(folder, "exclude_muted", False) and muted_until and muted_until > datetime.now(timezone.utc):
                 continue
             entities[entity.id] = entity
+    if resolved is not None:
+        resolved.clear()
+        resolved.update(entities)
     return [{"id": e.id, "title": e.title, "username": public_username(e).lower() if public_username(e) else None,
              "screenshot_supported": bool(public_username(e))} for e in sorted(entities.values(), key=lambda e: e.id)]

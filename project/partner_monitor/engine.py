@@ -62,6 +62,7 @@ class Monitor:
         self.campaign_worker = None
         self.campaign_background = False
         self._folder_checked = 0.0
+        self.folder_entities = {}
         self.scope_ready = not config.channel_folder_watch
         if config.campaign_matching:
             from .candidate_archive import CandidateArchive
@@ -79,9 +80,10 @@ class Monitor:
         from .channel_folder import folder_channels
         self._folder_checked = asyncio.get_running_loop().time() + 600
         try:
-            channels = await folder_channels(self.client, self.config.channel_folder)
+            channels = await folder_channels(self.client, self.config.channel_folder, resolved=self.folder_entities)
         except (ValueError, OSError, asyncio.TimeoutError, errors.RPCError) as exc:
             if isinstance(exc, errors.FloodWaitError):
+                self._folder_checked = asyncio.get_running_loop().time() + exc.seconds + 1
                 raise
             log.warning("Папка каналов не прочитана (%s)", type(exc).__name__)
             # Never expand to the whole account on a missing/failed folder.
@@ -517,7 +519,9 @@ class Monitor:
             # failure of the source chat. Its durable source cursor is unchanged.
             self.store.set_state('source_intake_error',type(exc).__name__)
             log.warning('Приём материалов отложен (%s); замеры и каналы продолжаются',type(exc).__name__)
-        for partner in self.store.rows("SELECT * FROM partners WHERE status NOT IN ('ignored','needs_review')"):
+        for partner in self.store.rows("""SELECT p.* FROM partners p LEFT JOIN state s
+            ON s.key='channel_checked_at:'||p.id WHERE p.status NOT IN ('ignored','needs_review')
+            ORDER BY coalesce(s.value,''),p.id"""):
             scope_ref = PartnerReference(partner["username"], private_channel_id=partner.get("private_channel_id"))
             if not self.config.permits(scope_ref):
                 continue
@@ -530,7 +534,11 @@ class Monitor:
                 if placements and all(p["status"] in {"needs_review", "dismissed", "not_found"} for p in placements) and not self.store.rows("SELECT id FROM posts WHERE partner_id=?", (partner["id"],)):
                     continue
                 await asyncio.sleep(1)
-                if partner["username"]:
+                from .channel_folder import public_username
+                known = self.folder_entities.get(partner.get("channel_id"))
+                if known and (public_username(known) or '').lower() == (partner['username'] or '').lower():
+                    entity = known
+                elif partner["username"]:
                     entity = await self.client.get_entity(partner["username"])
                 elif partner.get("private_channel_id"):
                     entity = await self.client.get_entity(types.PeerChannel(partner["private_channel_id"]))
@@ -547,7 +555,6 @@ class Monitor:
                 if not isinstance(entity, types.Channel) or not entity.broadcast:
                     self.store.execute("UPDATE partners SET status='ignored',last_error=? WHERE id=?", ("Ссылка ведёт на пользователя, бота или группу, а не на канал", partner["id"]))
                     continue
-                from .channel_folder import public_username
                 if partner["username"] and not public_username(entity):
                     raise ValueError("Нет публичного username")
                 if partner.get("channel_id") and partner["channel_id"] != entity.id:

@@ -26,6 +26,26 @@ def lead_row(lead,tz_name='Asia/Tashkent'):
         "Не сверено", "Новый", "Сверить с клиентской базой и найти контакт маркетинга", "", "", datevalue(lead["checked"]), lead["confidence"]]
 
 
+def script_row_moves(sheet_id,lead_rows,script_rows):
+    lead_ids=[str(r[0]) for r in lead_rows if r and r[0]]
+    current=[str(r[0]) if r and r[0] else None for r in script_rows]
+    script_ids=[ident for ident in current if ident is not None]
+    if len(set(lead_ids))!=len(lead_ids) or len(set(script_ids))!=len(script_ids):
+        raise ValueError('Duplicate company IDs; script rows were not moved')
+    present=set(script_ids)
+    wanted=[ident for ident in lead_ids if ident in present]
+    requests=[]
+    for target,ident in enumerate(wanted):
+        source=current.index(ident,target)
+        if source==target:continue
+        # Moves always go upward. Index 0 is the header, and all row content,
+        # including custom scripts, notes and extra team columns, moves together.
+        requests.append({'moveDimension':{'source':{'sheetId':sheet_id,'dimension':'ROWS',
+            'startIndex':source+1,'endIndex':source+2},'destinationIndex':target+1}})
+        current.insert(target,current.pop(source))
+    return requests
+
+
 class Sheets:
     def __init__(self, cfg):
         if not cfg.spreadsheet_id:
@@ -45,6 +65,16 @@ class Sheets:
     def read(self, name, bounds):
         return self.api("GET", "/values/" + quote("'" + name + "'!" + bounds, safe=""),
             params={"valueRenderOption":"FORMATTED_VALUE"}).get("values", [])
+
+    def align_script_order(self,meta):
+        names={s['properties']['title']:s['properties']['sheetId'] for s in meta.get('sheets',[])}
+        if not {'Лиды','Скрипты'}<=names.keys():return
+        # Read the actual order after the lead sort, including ties/manual sorts.
+        # Never regenerate or overwrite script values to rearrange their rows.
+        leads=self.read('Лиды','A2:A5000')
+        scripts=self.read('Скрипты','A2:A5000')
+        requests=script_row_moves(names['Скрипты'],leads,scripts)
+        if requests:self.api('POST',':batchUpdate',json={'requests':requests})
 
     def verify(self):
         meta = self.api('GET',params={"fields":"spreadsheetId,spreadsheetUrl,properties(title),sheets(properties,tables)"})
@@ -171,5 +201,6 @@ class Sheets:
         if sorts:
             self.api('POST',':batchUpdate',json={'requests':sorts})
         if lead_sheet:store.set_state('lead_recent_first_v1','1')
+        self.align_script_order(meta)
         store.set_state("last_synced", __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
         return len(new_leads)

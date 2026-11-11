@@ -8,7 +8,7 @@ from sales_agent.config import Config
 from sales_agent.research import validate, Deferred
 from sales_agent.rules import RuleResearcher
 from sales_agent.runner import cycle, due
-from sales_agent.sheets import Sheets, LEAD_HEADERS, SCRIPT_HEADERS, lead_row
+from sales_agent.sheets import Sheets, LEAD_HEADERS, SCRIPT_HEADERS, lead_row, script_row_moves
 from sales_agent.sources import parse_feed, parse_telegram, relevant
 from sales_agent.store import Store
 
@@ -259,6 +259,64 @@ class SalesTests(unittest.TestCase):
         sheet.read=read;sheet.calls=[];sheet.sync(self.store)
         sorts=[r for path,data in sheet.calls if path==':batchUpdate' for r in data['requests'] if 'sortRange' in r]
         self.assertFalse(any(r['sortRange']['range']['sheetId']==42 for r in sorts))
+
+    def test_script_order_matches_actual_leads_and_preserves_custom_content(self):
+        class Fake(Sheets):
+            def __init__(self):
+                self.leads=[['new'],['same-date-b'],['same-date-a'],['old']]
+                self.rows=[['old','Old','Edited by team',{'note':'Keep this note'}],
+                           ['same-date-a','A','Custom A'],['new','New','Custom newest'],
+                           ['unknown','Manual extra','Keep extra row'],['same-date-b','B','Custom B']]
+                self.before={r[0]:r[:] for r in self.rows};self.calls=[]
+            def read(self,name,bounds):
+                self.calls.append(('read',name,bounds))
+                return self.leads if name=='Лиды' else [[r[0]] for r in self.rows]
+            def api(self,method,path='',**kwargs):
+                self.calls.append(('write',method,path))
+                for req in kwargs['json']['requests']:
+                    self.assert_move(req)
+                    move=req['moveDimension'];source=move['source']['startIndex']-1
+                    self.rows.insert(move['destinationIndex']-1,self.rows.pop(source))
+            def assert_move(self,req):
+                assert set(req)=={'moveDimension'} and req['moveDimension']['source']['dimension']=='ROWS'
+        sheet=Fake();meta={'sheets':[{'properties':{'title':n,'sheetId':i}} for i,n in enumerate(('Лиды','Скрипты'))]}
+        sheet.align_script_order(meta)
+        self.assertEqual([r[0] for r in sheet.rows],['new','same-date-b','same-date-a','old','unknown'])
+        self.assertEqual({r[0]:r for r in sheet.rows},sheet.before)
+        sheet.calls=[];sheet.align_script_order(meta)
+        self.assertFalse(any(c[0]=='write' for c in sheet.calls))
+        # A manual sort on Leads is reflected on the next sync, including tied dates.
+        sheet.leads=[['old'],['same-date-a'],['same-date-b'],['new']]
+        sheet.align_script_order(meta)
+        self.assertEqual([r[0] for r in sheet.rows],['old','same-date-a','same-date-b','new','unknown'])
+        self.assertEqual({r[0]:r for r in sheet.rows},sheet.before)
+
+    def test_script_order_keeps_blanks_and_rejects_ambiguous_duplicate_ids(self):
+        rows=[[],['b'],['a'],['unknown']]
+        for req in script_row_moves(17,[['a'],['b']],rows):
+            move=req['moveDimension'];rows.insert(move['destinationIndex']-1,rows.pop(move['source']['startIndex']-1))
+        self.assertEqual(rows,[['a'],['b'],[],['unknown']])
+        for leads,scripts in [([['a'],['a']],[['a']]),([['a']],[['a'],['a']])]:
+            with self.assertRaisesRegex(ValueError,'Duplicate company IDs'):script_row_moves(17,leads,scripts)
+
+    def test_script_alignment_runs_after_all_sync_writes_and_lead_sort(self):
+        lead=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)
+        self.store.add_lead(lead)
+        self.store.add_lead(dict(lead,company='Other',source_url='https://t.me/spotuz/124'))
+        class Fake(Sheets):
+            def __init__(self):self.calls=[];self.timezone='Asia/Tashkent'
+            def verify(self):return {'sheets':[{'properties':{'title':'Лиды','sheetId':42}}]}
+            def publication_sheet(self,meta):return {'properties':{'sheetId':43}}
+            def read(self,name,bounds):
+                from sales_agent.sheets import PUBLICATION_HEADERS
+                return [LEAD_HEADERS] if name=='Лиды' else [SCRIPT_HEADERS] if name=='Скрипты' else [PUBLICATION_HEADERS]
+            def api(self,method,path='',**kwargs):self.calls.append((path,kwargs['json']));return {}
+            def align_script_order(self,meta):
+                assert self.calls[-1][0]==':batchUpdate'
+                assert any(r.get('sortRange',{}).get('range',{}).get('sheetId')==42 for r in self.calls[-1][1]['requests'])
+                self.calls.append(('aligned',{}))
+        sheet=Fake();sheet.sync(self.store)
+        self.assertEqual(sheet.calls[-1][0],'aligned')
 
     def test_ad_subject_is_not_the_rating_agency_or_ranking(self):
         examples=[

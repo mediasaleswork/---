@@ -128,6 +128,48 @@ class SyncLifecycleTests(unittest.TestCase):
         self.store.close();self.store=Store(self.path)
         self.sheet.sync(self.store);self.assert_order()
         self.assertEqual(self.sheet.rows['Лиды'][1][0],fresh['id'])
+        self.assertEqual(self.sheet.rows['Публикации'][1][5],fresh['id'])
+
+    def test_revised_source_updates_facts_and_history_but_preserves_custom_text(self):
+        old=self.add('Edited')
+        self.sheet.sync(self.store)
+        self.row('Скрипты',old['id'])[2]='Team script'
+        self.row('Лиды',old['id'])[14]='Team note'
+        revised=dict(old,evidence_quote='Corrected commercial announcement',scripts={**old['scripts'],'first':'Revised script'})
+        self.store.add_lead(revised)
+        self.sheet.sync(self.store)
+        self.assertEqual(self.row('Лиды',old['id'])[4],revised['evidence_quote'])
+        self.assertEqual(self.sheet.rows['Публикации'][1][3],revised['evidence_quote'])
+        self.assertEqual(self.row('Скрипты',old['id'])[2],'Team script')
+        self.assertEqual(self.row('Лиды',old['id'])[14],'Team note')
+        self.assertEqual(len(self.store.publications()),1)
+        self.assertEqual(self.store.publication_revisions(),[old])
+
+    def test_formula_text_is_preserved_and_formula_based_ids_are_resolved(self):
+        sheet=Sheets.__new__(Sheets)
+        expression='="Team approved"'
+        sheet.api=lambda method,path,params: {'values': [SCRIPT_HEADERS,
+            ['="MS-key"','Name',expression] if params['valueRenderOption']=='FORMULA'
+            else ['MS-key','Name','Team approved']]}
+        self.assertEqual(sheet.read('Скрипты','A1:F5000')[1],['MS-key','Name',expression])
+
+    def test_append_past_grid_end_expands_all_three_tabs_before_writing(self):
+        self.add('One');self.add('Two',1)
+        meta=self.sheet.verify()
+        for tab in meta['sheets']:
+            tab['properties']['gridProperties']['rowCount']=2
+        self.sheet.verify=lambda:meta
+        calls=[]
+        original=self.sheet.api
+        def trace(method,path='',**kwargs):
+            calls.append((path,deepcopy(kwargs['json'])))
+            return original(method,path,**kwargs)
+        self.sheet.api=trace
+        self.sheet.sync(self.store)
+        requests=calls[0][1]['requests']
+        self.assertEqual({q['appendDimension']['sheetId'] for q in requests if 'appendDimension' in q},
+            {self.sheet.ids[name] for name in ('Лиды','Скрипты','Публикации')})
+        self.assert_order()
 
     def test_lost_values_reply_recovers_without_duplicate_rows(self):
         self.add('Old');self.sheet.sync(self.store);fresh=self.add('New',10)

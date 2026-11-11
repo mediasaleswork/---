@@ -366,6 +366,80 @@ class SalesTests(unittest.TestCase):
             row=dict(self.source,text=body,title=body[:100])
             self.assertFalse(RuleResearcher().classify([row],NOW),body)
 
+    def test_short_edited_publication_becomes_a_lead_and_keeps_source_contact(self):
+        from sales_agent.sources import collect
+        self.cfg.feeds=[]; self.cfg.channels=['example']
+        original='Информация для покупателей.'
+        revised='Haval открыл новый салон. #реклама'
+        def page(body):
+            return (f'<div class="tgme_widget_message" data-post="example/7"><time datetime="{NOW.isoformat()}"></time>'
+                    f'<div class="tgme_widget_message_text">{body}<a href="https://haval.uz"></a></div></div>')
+        with patch('sales_agent.sources.fetch',return_value=page(original)):
+            collect(self.cfg,self.store,NOW)
+        cycle(self.cfg,self.store,now=NOW,collect_sources=False)
+        with patch('sales_agent.sources.fetch',return_value=page(revised)):
+            self.assertEqual(cycle(self.cfg,self.store,now=NOW)['status'],'ok')
+            self.assertEqual(cycle(self.cfg,self.store,now=NOW)['new_publications'],0)
+        lead=next(l for l in self.store.leads() if l['company']=='Haval')
+        self.assertEqual(lead['evidence_quote'],revised)
+        self.assertIn('https://haval.uz',lead['contact'])
+
+    def test_history_restarts_on_saved_page_and_keeps_new_tip(self):
+        import json
+        from sales_agent.sources import collect
+        self.cfg.feeds=[];self.cfg.channels=['example']
+        url='https://t.me/s/example'
+        def page(lo,hi,older=None,media=False):
+            rows=''.join(f'<div class="tgme_widget_message" data-post="example/{i}"><time datetime="{NOW.isoformat()}"></time>'
+                         + ('' if media else '<div class="tgme_widget_message_text">Текст</div>')+'</div>' for i in range(lo,hi+1))
+            return rows+(f'<a href="/s/example?before={older}"></a>' if older else '')
+        pages={url:page(9,10,9),url+'?before=9':page(7,8,7,True),url+'?before=7':page(5,6,5),
+               url+'?before=5':page(3,4,3),url+'?before=3':page(1,2)}
+        with patch('sales_agent.sources.fetch',side_effect=lambda address:pages[address]):
+            collect(self.cfg,self.store,NOW)
+            self.assertEqual(json.loads(self.store.state('telegram_history:example'))['before'],5)
+            self.store.close();self.store=Store(self.root/'sales.db')
+            with patch('sales_agent.sources.fetch',side_effect=[page(11,12,11),OSError('lost response')]):
+                collect(self.cfg,self.store,NOW)
+            self.assertEqual(json.loads(self.store.state('telegram_history:example'))['before'],5)
+            pages[url]=page(11,12,11)
+            collect(self.cfg,self.store,NOW)
+            self.assertEqual(json.loads(self.store.state('telegram_history:example')),{'head':10})
+            pages[url+'?before=11']=page(9,10,9)
+            collect(self.cfg,self.store,NOW)
+        self.assertEqual(json.loads(self.store.state('telegram_history:example')),{'head':12})
+        rows=self.store.db.execute("SELECT url FROM sources WHERE origin='Telegram @example'").fetchall()
+        self.assertEqual({int(r[0].rsplit('/',1)[1]) for r in rows},set(range(1,13))-{7,8})
+
+    def test_all_sources_failed_still_drains_saved_queue_and_flags_current_cycle(self):
+        self.store.source_health('removed_source','ok','')
+        self.cfg.feeds=['https://example.invalid/rss'];self.cfg.channels=[]
+        with patch('sales_agent.sources.fetch',side_effect=OSError()):
+            result=cycle(self.cfg,self.store,now=NOW)
+        self.assertEqual(result['status'],'error')
+        self.assertEqual(result['new_leads'],1)
+
+    def test_once_honors_pause_and_does_not_collect(self):
+        from sales_agent.runner import run
+        with patch('sales_agent.runner.Sheets') as sheets,patch('sales_agent.runner.cycle') as scan:
+            sheets.return_value.read.return_value=[[True]]
+            run(self.cfg,once=True)
+            scan.assert_not_called()
+            sheets.return_value.sync.assert_called_once()
+
+    def test_malformed_contact_link_does_not_block_other_sources(self):
+        import json
+        from sales_agent.research import enrich_contact
+        row=dict(self.source,links=json.dumps(['https://[','https://other-testbrand.uz','https://testbrand.uz']))
+        lead=validate(candidate(row['id']),{row['id']:row},NOW)
+        self.assertTrue(enrich_contact(lead,row)['contact'].startswith('https://testbrand.uz '))
+
+    def test_atom_uses_article_url_when_self_link_is_last(self):
+        rows=parse_feed(f'<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Компания</title>'
+            f'<updated>{NOW.isoformat()}</updated><link rel="alternate" href="https://example.uz/article"/>'
+            '<link rel="self" href="https://example.uz/feed"/></entry></feed>','test')
+        self.assertEqual(rows[0]['url'],'https://example.uz/article')
+
     def test_workbook_identity_read_precedes_writes_and_refuses_wrong_headers(self):
         class Fake(Sheets):
             def __init__(self): self.calls=[]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
@@ -28,16 +29,16 @@ def fetch(url):
         ip = None
     if parsed.hostname in {"localhost", "metadata.google.internal"} or ip and not ip.is_global:
         raise ValueError("Non-public source")
-    response = requests.get(url, headers=HEADERS, timeout=(10, 35), stream=True, allow_redirects=False)
-    response.raise_for_status()
-    if 300 <= response.status_code < 400:
-        raise ValueError("Source moved; update its configured URL")
-    chunks, size = [], 0
-    for chunk in response.iter_content(65536):
-        size += len(chunk)
-        if size > 3_000_000:
-            raise ValueError("Source exceeds size limit")
-        chunks.append(chunk)
+    with requests.get(url, headers=HEADERS, timeout=(10, 35), stream=True, allow_redirects=False) as response:
+        response.raise_for_status()
+        if 300 <= response.status_code < 400:
+            raise ValueError("Source moved; update its configured URL")
+        chunks, size = [], 0
+        for chunk in response.iter_content(65536):
+            size += len(chunk)
+            if size > 3_000_000:
+                raise ValueError("Source exceeds size limit")
+            chunks.append(chunk)
     return b"".join(chunks).decode("utf-8-sig", errors="replace")
 
 
@@ -60,9 +61,10 @@ def parse_feed(raw, origin):
     result = []
     for node in [*root.findall(".//item"), *root.findall("{http://www.w3.org/2005/Atom}entry")]:
         fields = {child.tag.split("}")[-1]: child for child in node}
-        def value(*names):
-            return next(((fields[name].text or "") for name in names if name in fields), "")
-        link = value("link") or (fields["link"].attrib.get("href", "") if "link" in fields else "")
+        def value(*names, fields=fields):
+            return next((fields[name].text for name in names if name in fields and fields[name].text), "")
+        link = value("link").strip() or next((child.get("href","") for child in node
+            if child.tag.split("}")[-1]=="link" and child.get("rel","alternate")=="alternate"), "")
         if not link.startswith("https://"):
             continue
         try:
@@ -76,23 +78,73 @@ def parse_feed(raw, origin):
     return result
 
 
-def parse_telegram(raw, channel):
+def telegram_page(raw, channel):
     soup = BeautifulSoup(raw, "html.parser")
     result = []
     for node in soup.select(".tgme_widget_message[data-post]"):
         post = node.get("data-post", "")
         text = node.select_one(".tgme_widget_message_text")
         time = node.select_one(".tgme_widget_message_date time[datetime]") or node.select_one("time[datetime]")
-        if not text or not time or not re.fullmatch(re.escape(channel) + r"/\d+", post, flags=re.I):
+        if not time or not re.fullmatch(re.escape(channel) + r"/\d+", post, flags=re.I):
             continue
         try:
             published = parse_date(time.get("datetime", ""))
         except (ValueError, TypeError, OverflowError):
             continue
-        body = clean(str(text))
+        body = clean(str(text)) if text else ""
         result.append(dict(url="https://t.me/" + post, title=body[:180], text=body, published=published,
-            origin="Telegram @" + channel, links=[a["href"] for a in text.select("a[href]") if a["href"].startswith("https://")]))
-    return result
+            origin="Telegram @" + channel, links=[a["href"] for a in text.select("a[href]") if a["href"].startswith("https://")] if text else []))
+    before = None
+    for anchor in soup.select('a[href*="before="]'):
+        match = re.fullmatch(r'(?:https://t\.me)?/s/'+re.escape(channel)+r'\?before=(\d+)', anchor['href'], re.I)
+        if match:
+            before = int(match[1])
+            break
+    return result, before
+
+
+def parse_telegram(raw, channel):
+    return [item for item in telegram_page(raw, channel)[0] if item["text"]]
+
+
+def save_items(store, items, since, until):
+    accepted = 0
+    for item in items:
+        if item["text"] and since <= datetime.fromisoformat(item["published"]) <= until:
+            store.add_source(item)
+            accepted += 1
+    return accepted
+
+
+def collect_channel(store, url, channel, since, until):
+    key = 'telegram_history:' + channel.lower()
+    state = json.loads(store.state(key, '{}'))
+    head = state.get('head', 0)
+    tip = state.get('tip', 0)
+    resume = state.get('before')
+    total = accepted = 0
+    before = None
+    # Always poll the current page. Walk older pages incrementally across restarts.
+    for _ in range(3):
+        items, older = telegram_page(fetch(url if before is None else f'{url}?before={before}'), channel)
+        if not items:
+            raise ValueError("Telegram page contains no dated posts")
+        ids = [int(item["url"].rsplit('/', 1)[1]) for item in items]
+        total += len(items)
+        accepted += save_items(store, items, since, until)
+        if before is None and resume is not None:
+            before = resume
+            continue
+        if before is None:
+            tip = max(ids)
+        elif min(ids) >= before or (older is not None and older >= before):
+            raise ValueError("Telegram history did not advance")
+        if older is None or older <= head or max(datetime.fromisoformat(i['published']) for i in items) < since:
+            store.set_state(key, json.dumps({'head': max(head, tip)}))
+            return total, accepted
+        before = older
+        store.set_state(key, json.dumps({'head': head, 'tip': tip, 'before': before}))
+    return total, accepted
 
 
 def collect(cfg, store, now):
@@ -104,18 +156,15 @@ def collect(cfg, store, now):
     total = 0
     for url, kind, label in sources:
         try:
-            raw = fetch(url)
-            items = parse_feed(raw, label) if kind == "rss" else parse_telegram(raw, label)
-            accepted = 0
-            for item in items:
-                date = datetime.fromisoformat(item["published"])
-                if since <= date <= now + timedelta(minutes=10) and len(item["text"]) >= 80:
-                    store.add_source(item)
-                    accepted += 1
-            if not items:
-                store.source_health(url, "error", "Публикации не прочитаны: проверьте RSS или публичность канала")
+            until = now + timedelta(minutes=10)
+            if kind == 'telegram':
+                count, accepted = collect_channel(store, url, label, since, until)
             else:
-                store.source_health(url, "ok", f"Прочитано {len(items)}, в периоде {accepted}")
+                items = parse_feed(fetch(url), label)
+                if not items:
+                    raise ValueError("No dated RSS items")
+                count, accepted = len(items), save_items(store, items, since, until)
+            store.source_health(url, "ok", f"Прочитано {count}, в периоде {accepted}")
             total += accepted
         except Exception as exc:
             store.source_health(url, "error", type(exc).__name__)

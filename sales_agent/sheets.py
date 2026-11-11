@@ -26,6 +26,16 @@ def lead_row(lead,tz_name='Asia/Tashkent'):
         "Не сверено", "Новый", "Сверить с клиентской базой и найти контакт маркетинга", "", "", datevalue(lead["checked"]), lead["confidence"]]
 
 
+def sheet_rows(sheet):
+    return sheet.get('properties',{}).get('gridProperties',{}).get('rowCount',5000)
+
+
+def extend_grid(requests,sheet,end):
+    extra=end-sheet_rows(sheet)
+    if extra>0:
+        requests.append({'appendDimension':{'sheetId':sheet['properties']['sheetId'],'dimension':'ROWS','length':extra}})
+
+
 def script_row_moves(sheet_id,lead_rows,script_rows):
     lead_ids=[str(r[0]) for r in lead_rows if r and r[0]]
     current=[str(r[0]) if r and r[0] else None for r in script_rows]
@@ -63,21 +73,33 @@ class Sheets:
         return response.json()
 
     def read(self, name, bounds):
-        return self.api("GET", "/values/" + quote("'" + name + "'!" + bounds, safe=""),
-            params={"valueRenderOption":"FORMATTED_VALUE"}).get("values", [])
+        path="/values/" + quote("'" + name + "'!" + bounds, safe="")
+        identity={'Лиды':(0,8),'Скрипты':(0,),'Публикации':(4,5)}.get(name,())
+        if not identity or not bounds.startswith('A1:'):
+            return self.api('GET',path,params={'valueRenderOption':'UNFORMATTED_VALUE'}).get('values',[])
+        # A team's formula may display the previous generated text. Compare its
+        # expression so the next refresh retains it. Resolve formula-based keys separately.
+        rows=self.api('GET',path,params={'valueRenderOption':'FORMULA'}).get('values',[])
+        keys=[(n,c) for n,row in enumerate(rows) for c in identity
+              if c<len(row) and isinstance(row[c],str) and row[c].startswith('=')]
+        if keys:
+            effective=self.api('GET',path,params={'valueRenderOption':'UNFORMATTED_VALUE'}).get('values',[])
+            for n,c in keys:
+                rows[n][c]=effective[n][c] if n<len(effective) and c<len(effective[n]) else ''
+        return rows
 
     def align_script_order(self,meta):
-        names={s['properties']['title']:s['properties']['sheetId'] for s in meta.get('sheets',[])}
+        names={s['properties']['title']:s for s in meta.get('sheets',[])}
         if not {'Лиды','Скрипты'}<=names.keys():return
         # Read the actual order after the lead sort, including ties/manual sorts.
         # Never regenerate or overwrite script values to rearrange their rows.
-        leads=self.read('Лиды','A2:A5000')
-        scripts=self.read('Скрипты','A2:A5000')
-        requests=script_row_moves(names['Скрипты'],leads,scripts)
+        leads=self.read('Лиды',f"A2:A{sheet_rows(names['Лиды'])}")
+        scripts=self.read('Скрипты',f"A2:A{sheet_rows(names['Скрипты'])}")
+        requests=script_row_moves(names['Скрипты']['properties']['sheetId'],leads,scripts)
         if requests:self.api('POST',':batchUpdate',json={'requests':requests})
 
     def verify(self):
-        meta = self.api('GET',params={"fields":"spreadsheetId,spreadsheetUrl,properties(title),sheets(properties,tables)"})
+        meta = self.api('GET',params={"fields":"spreadsheetId,spreadsheetUrl,properties(title),sheets(properties,tables,basicFilter)"})
         names = {s["properties"]["title"] for s in meta["sheets"]}
         if not {"Лиды", "Скрипты", "Источники", "Работа агента"} <= names:
             raise ValueError("Wrong workbook: required Mediasales sheets missing")
@@ -88,10 +110,10 @@ class Sheets:
     def publication_sheet(self,meta):
         sh=next((s for s in meta.get('sheets',[]) if s['properties']['title']=='Публикации'),None)
         if not sh:
-            response=self.api('POST',':batchUpdate',json={'requests':[{'addSheet':{'properties':{'title':'Публикации','gridProperties':{'rowCount':5000,'columnCount':6,'frozenRowCount':1}}}}]})
-            sh={'properties':response['replies'][0]['addSheet']['properties']}
-            sid=sh['properties']['sheetId']
-            requests=[{'updateCells':{'range':{'sheetId':sid,'startRowIndex':0,'endRowIndex':1,'startColumnIndex':0,'endColumnIndex':6},'rows':[{'values':[{'userEnteredValue':{'stringValue':v}} for v in PUBLICATION_HEADERS]}],'fields':'userEnteredValue'}},
+            used={s['properties']['sheetId'] for s in meta.get('sheets',[])}
+            sid=next(i for i in range(len(used)+1) if i not in used)
+            sh={'properties':{'sheetId':sid,'title':'Публикации','gridProperties':{'rowCount':5000,'columnCount':6,'frozenRowCount':1}}}
+            requests=[{'addSheet':sh},{'updateCells':{'range':{'sheetId':sid,'startRowIndex':0,'endRowIndex':1,'startColumnIndex':0,'endColumnIndex':6},'rows':[{'values':[{'userEnteredValue':{'stringValue':v}} for v in PUBLICATION_HEADERS]}],'fields':'userEnteredValue'}},
                 {'updateDimensionProperties':{'range':{'sheetId':sid,'dimension':'ROWS','startIndex':0,'endIndex':1},'properties':{'pixelSize':44},'fields':'pixelSize'}},
                 {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':0,'endRowIndex':1,'startColumnIndex':0,'endColumnIndex':6},'cell':{'userEnteredFormat':{'backgroundColor':{'red':.93,'green':.93,'blue':.93},'textFormat':{'bold':True,'fontSize':11,'fontFamily':'Arial'},'wrapStrategy':'WRAP'}},'fields':'userEnteredFormat'}}]
             for i,width in enumerate([190,205,180,500,320,155]):
@@ -102,32 +124,41 @@ class Sheets:
     def sync(self, store):
         meta = self.verify() or {}
         writes = []
-        leads = self.read("Лиды", "A1:Q5000")
-        scripts = self.read("Скрипты", "A1:F5000")
+        tabs={s['properties']['title']:s for s in meta.get('sheets',[])}
+        leads = self.read("Лиды", f"A1:Q{sheet_rows(tabs.get('Лиды',{}))}")
+        scripts = self.read("Скрипты", f"A1:F{sheet_rows(tabs.get('Скрипты',{}))}")
         versions=store.publications()
+        revisions=store.publication_revisions()
+        by_source={}
+        script_versions={}
+        for v in [*versions,*revisions]:
+            by_source.setdefault((v['id'],v['source_url']),[]).append(v)
+            for key,value in v.get('scripts',{}).items():
+                script_versions.setdefault((v['id'],key),set()).add(value)
         latest={l['id']:l for l in store.leads()}
         refreshed=False
         # A newer source refreshes the publication fields, while team-owned K:O stays intact.
         for index,row in enumerate(leads[1:],start=2):
             if not row or row[0] not in latest or len(row)<9:continue
             lead=latest[row[0]]
-            old=next((v for v in versions if v['id']==row[0] and v['source_url']==row[8]),None)
-            if old and row[8]!=lead['source_url']:
-                refreshed=True
+            history=by_source.get((row[0],row[8]),[])
+            if history and (row[8]!=lead['source_url'] or len(history)>1):
                 current=(row+['']*17)[:17];target=lead_row(lead,self.timezone)
-                previous=lead_row(old,self.timezone)
-                for column in range(4,10):
-                    if (column in (5,8) or current[column]==previous[column]) and current[column]!=target[column]:
+                previous=[lead_row(v,self.timezone) for v in history]
+                row_changed=False
+                for column in (2,3,4,5,6,7,8,9,16):
+                    if (column in (5,8) or any(current[column]==p[column] for p in previous)) and current[column]!=target[column]:
                         writes.append({'range':f"'Лиды'!{chr(65+column)}{index}",'values':[[target[column]]]})
-                writes.append({'range':f"'Лиды'!P{index}",'values':[[target[15]]]})
-                if current[16]==previous[16] and current[16]!=target[16]:
-                    writes.append({'range':f"'Лиды'!Q{index}",'values':[[target[16]]]})
+                        row_changed=True
+                        if column==5:refreshed=True
+                if row_changed:
+                    writes.append({'range':f"'Лиды'!P{index}",'values':[[target[15]]]})
         for index,row in enumerate(scripts[1:],start=2):
             if not row or row[0] not in latest:continue
             for column,key in enumerate(['first','followup','call','objections'],start=2):
                 value=row[column] if len(row)>column else ''
                 target=latest[row[0]]['scripts'][key]
-                if value!=target and any(value==v.get('scripts',{}).get(key) for v in versions if v['id']==row[0]):
+                if value!=target and value in script_versions.get((row[0],key),()):
                     letter=chr(65+column)
                     writes.append({'range':f"'Скрипты'!{letter}{index}",'values':[[target]]})
         # Key by stable ID, never by row order. Existing rows and manual edits stay intact.
@@ -136,8 +167,6 @@ class Sheets:
         new_leads = [lead_row(l,self.timezone) for l in store.leads() if l["id"] not in existing]
         new_scripts = [[l["id"],l["company"],*(l["scripts"][k] for k in ("first","followup","call","objections"))]
             for l in store.leads() if l["id"] not in existing_scripts]
-        if len(leads) + len(new_leads) >= 5000 or len(scripts) + len(new_scripts) >= 5000:
-            raise ValueError("Workbook capacity reached; extend bounded sync ranges")
         if new_leads or refreshed:
             # Persist before any Google mutation. If values commit but the reply
             # or later sort fails, the next sync/restart must still sort them.
@@ -151,24 +180,42 @@ class Sheets:
         if meta.get('sheets'):
             publication_sheet=self.publication_sheet(meta)
             sid=publication_sheet['properties']['sheetId']
-            posted=self.read('Публикации','A1:F5000')
+            posted=self.read('Публикации',f'A1:F{sheet_rows(publication_sheet)}')
             if not posted or posted[0]!=PUBLICATION_HEADERS:raise ValueError('Publication headers changed')
             published_keys={(r[5],r[4]) for r in posted[1:] if len(r)>=6}
+            changed_dates=False
+            for index,row in enumerate(posted[1:],start=2):
+                if len(row)<6:continue
+                history=by_source.get((row[5],row[4]),[])
+                if len(history)<2:continue
+                for column,key in [(1,'published'),(3,'evidence_quote')]:
+                    values=[datevalue(v[key],self.timezone) if column==1 else v[key] for v in history]
+                    if row[column]!=values[0] and row[column] in values[1:]:
+                        writes.append({'range':f"'Публикации'!{chr(65+column)}{index}",'values':[[values[0]]]})
+                        if column==1:changed_dates=True
             additions=[]
             for v in versions:
                 if (v['id'],v['source_url']) in published_keys:continue
                 url=urlsplit(v['source_url']);platform='@'+url.path.strip('/').split('/')[0] if url.hostname=='t.me' else url.hostname
                 additions.append([v['company'],datevalue(v['published'],self.timezone),platform,v['evidence_quote'],v['source_url'],v['id']])
-            if len(posted)+len(additions)>=5000:raise ValueError('Publication capacity reached')
+            end=len(posted)+len(additions)
+            extend_grid(structure,publication_sheet,end)
+            if additions or changed_dates:
+                store.set_state('publication_recent_first_v1','pending')
+            if end>2 and store.state('publication_recent_first_v1')!='done':
+                width=publication_sheet['properties'].get('gridProperties',{}).get('columnCount',6)
+                publication_sort={'sortRange':{'range':{'sheetId':sid,'startRowIndex':1,'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':width},'sortSpecs':[{'dimensionIndex':1,'sortOrder':'DESCENDING'}]}}
             if additions:
-                end=len(posted)+len(additions)
-                publication_sort={'sortRange':{'range':{'sheetId':sid,'startRowIndex':1,'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':6},'sortSpecs':[{'dimensionIndex':1,'sortOrder':'DESCENDING'}]}}
                 writes.append({'range':f"'Публикации'!A{len(posted)+1}:F{end}",'values':additions})
                 structure.extend([
                     {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':len(posted),'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':6},'cell':{'userEnteredFormat':{'wrapStrategy':'WRAP','verticalAlignment':'TOP','textFormat':{'fontFamily':'Arial','fontSize':11}}},'fields':'userEnteredFormat'}},
-                    {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':1,'endRowIndex':end,'startColumnIndex':1,'endColumnIndex':2},'cell':{'userEnteredFormat':{'numberFormat':{'type':'DATE_TIME','pattern':'dd.mm.yyyy hh:mm'}}},'fields':'userEnteredFormat.numberFormat'}},
+                    {'repeatCell':{'range':{'sheetId':sid,'startRowIndex':len(posted),'endRowIndex':end,'startColumnIndex':1,'endColumnIndex':2},'cell':{'userEnteredFormat':{'numberFormat':{'type':'DATE_TIME','pattern':'dd.mm.yyyy hh:mm'}}},'fields':'userEnteredFormat.numberFormat'}},
                     {'updateDimensionProperties':{'range':{'sheetId':sid,'dimension':'ROWS','startIndex':len(posted),'endIndex':end},'properties':{'pixelSize':100},'fields':'pixelSize'}},
-                    {'setBasicFilter':{'filter':{'range':{'sheetId':sid,'startRowIndex':0,'endRowIndex':end,'startColumnIndex':0,'endColumnIndex':6}}}}])
+                    ])
+                active=publication_sheet.get('basicFilter',{})
+                area=active.get('range',{'sheetId':sid,'startRowIndex':0,'startColumnIndex':0,'endColumnIndex':6,'endRowIndex':0})
+                if area.get('endRowIndex',end)<end:
+                    structure.append({'setBasicFilter':{'filter':{**active,'range':{**area,'endRowIndex':end}}}})
         for sh in meta.get('sheets', []):
             name=sh['properties']['title']
             additions=new_leads if name=='Лиды' else new_scripts if name=='Скрипты' else []
@@ -176,6 +223,7 @@ class Sheets:
             if not additions:
                 continue
             sid=sh['properties']['sheetId']
+            extend_grid(structure,sh,previous+len(additions))
             structure.append({'repeatCell':{'range':{'sheetId':sid,'startRowIndex':previous,'endRowIndex':previous+len(additions),'startColumnIndex':0,'endColumnIndex':17 if name=='Лиды' else 6},
                 'cell':{'userEnteredFormat':{'wrapStrategy':'WRAP','verticalAlignment':'TOP','textFormat':{'fontFamily':'Arial','fontSize':11}}},'fields':'userEnteredFormat'}})
             structure.append({'updateDimensionProperties':{'range':{'sheetId':sid,'dimension':'ROWS','startIndex':previous,'endIndex':previous+len(additions)},'properties':{'pixelSize':116 if name=='Лиды' else 190},'fields':'pixelSize'}})
@@ -184,7 +232,7 @@ class Sheets:
                     structure.append({'updateTable':{'table':{'tableId':table['tableId'],'range':dict(table['range'],endRowIndex=previous+len(additions))},'fields':'range'}})
             if name=='Лиды':
                 for column,pattern in [(5,'dd.mm.yyyy hh:mm'),(15,'yyyy-mm-dd hh:mm')]:
-                    structure.append({'repeatCell':{'range':{'sheetId':sid,'startRowIndex':1 if column==5 else previous,'endRowIndex':previous+len(additions),'startColumnIndex':column,'endColumnIndex':column+1},
+                    structure.append({'repeatCell':{'range':{'sheetId':sid,'startRowIndex':previous,'endRowIndex':previous+len(additions),'startColumnIndex':column,'endColumnIndex':column+1},
                         'cell':{'userEnteredFormat':{'numberFormat':{'type':'DATE_TIME','pattern':pattern}}},'fields':'userEnteredFormat.numberFormat'}})
         if structure:
             self.api('POST',':batchUpdate',json={'requests':structure})
@@ -206,7 +254,13 @@ class Sheets:
                 'sortSpecs':[{'dimensionIndex':5,'sortOrder':'DESCENDING'}]}})
         if sorts:
             self.api('POST',':batchUpdate',json={'requests':sorts})
+        if publication_sort:store.set_state('publication_recent_first_v1','done')
         if lead_sheet:store.set_state('lead_recent_first_v1','1')
+        # Google has applied any row growth by this point.
+        for name,end in [('Лиды',len(leads)+len(new_leads)),('Скрипты',len(scripts)+len(new_scripts))]:
+            sh=tabs.get(name)
+            if sh and end>sheet_rows(sh):
+                sh['properties'].setdefault('gridProperties',{})['rowCount']=end
         self.align_script_order(meta)
         store.set_state("last_synced", __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
         return len(new_leads)

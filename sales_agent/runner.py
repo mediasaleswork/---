@@ -9,14 +9,15 @@ from .research import Deferred, validate, enrich_contact
 from .rules import RuleResearcher
 from .sheets import Sheets
 from .sources import collect, relevant
-from .store import Store, stamp
+from .store import Store, normalized, stamp
 
 log = logging.getLogger(__name__)
 
 
 def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
     now = now or datetime.now(timezone.utc)
-    run = store.db.execute("INSERT INTO runs(started,status) VALUES(?,?)", (stamp(), "running")).lastrowid
+    started=stamp()
+    run = store.db.execute("INSERT INTO runs(started,status) VALUES(?,?)", (started, "running")).lastrowid
     store.db.commit()
     new_count, count, status, detail = 0, 0, "ok", ""
     publications_before=store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]
@@ -26,10 +27,10 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
             with store.db:
                 store.db.execute('UPDATE sources SET processed=0 WHERE published>=?',((now-timedelta(days=cfg.lookback_days)).isoformat(),))
             store.set_state('research_engine','rules-2')
+        available=True
         if collect_sources:
             count = collect(cfg, store, now)
-            if not store.db.execute("SELECT 1 FROM source_health WHERE status='ok'").fetchone():
-                raise ValueError("No sources available")
+            available=bool(store.db.execute("SELECT 1 FROM source_health WHERE status='ok' AND checked>=?",(started,)).fetchone())
         pending=store.pending((now - timedelta(days=cfg.lookback_days)).isoformat())
         queue = [s for s in pending if relevant(s)]
         accepted_ids={s['id'] for s in queue}
@@ -44,7 +45,9 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
             for items in grouped.values():
                 if items:
                     queue.append(items.pop(0))
-        researcher = researcher or RuleResearcher(l['company'] for l in store.leads())
+        companies=[lead['company'] for lead in store.leads()]
+        known={normalized(company) for company in companies}
+        researcher = researcher or RuleResearcher(companies)
         for offset in range(0, len(queue), cfg.batch_size):
             batch = queue[offset:offset + cfg.batch_size]
             candidates = researcher.classify(batch, now)
@@ -53,19 +56,22 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
             for candidate in candidates:
                 lead = validate(candidate, sources, now)
                 if lead:
-                    if new_count >= cfg.max_leads:
+                    key=normalized(lead['company'])
+                    if new_count >= cfg.max_leads and key not in known:
                         overflow.add(candidate["source_id"])
                     else:
                         lead=enrich_contact(lead,sources[candidate['source_id']])
                         if store.add_lead(lead):
                             new_count += 1
+                            known.add(key)
             store.processed([r["id"] for r in batch if r["id"] not in overflow])
-            if new_count >= cfg.max_leads:
-                break
         new_publications=store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]-publications_before
         detail = "Новых компаний: "+str(new_count)+", публикаций: "+str(new_publications)+". История размещений — на листе «Публикации». Перед обращением нужна проверка CRM"
         if not queue:
             detail += "; в очереди нет свежих коммерческих сигналов"
+        if not available:
+            status="error"
+            detail += "; ни один источник не ответил в этом цикле"
     except Deferred as exc:
         status, detail = "deferred", str(exc)
     except Exception as exc:
@@ -86,20 +92,23 @@ def run(cfg, once=False):
     try:
         # Google access and workbook identity are checked before monitoring.
         sheet = Sheets(cfg)
-        sheet.verify()
+        verified = False
         while True:
             now = datetime.now(timezone.utc)
             try:
-                # B2 is the only agent control. It is read on each minute/sync.
+                if not verified:
+                    sheet.verify()
+                    verified = True
+                # B2 is the agent control, including for a one-off scan.
                 paused = sheet.read("Работа агента", "B2:B2")
-                paused = bool(paused and str(paused[0][0]).strip().casefold() in {"true","да","пауза","1"})
+                paused = bool(paused and paused[0] and str(paused[0][0]).strip().casefold() in {"true","да","пауза","1"})
                 retry_at = store.state("next_retry")
                 retry_due = retry_at and datetime.fromisoformat(retry_at) <= now
-                if once or not paused and (due(store, cfg, now) or retry_due):
+                if not paused and (once or due(store, cfg, now) or retry_due):
                     result = cycle(cfg, store, now=now)
                     log.info("Mediasales: %s", json.dumps(result,ensure_ascii=False))
                     if result["status"] != "ok":
-                        store.set_state("next_retry",(now+timedelta(hours=4)).isoformat())
+                        store.set_state("next_retry",(now+timedelta(minutes=5)).isoformat())
                     else:
                         store.set_state("next_retry", "")
                 # Retry Google writes independently of source collection.

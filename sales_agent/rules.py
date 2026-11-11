@@ -131,7 +131,9 @@ def evidence(text, start, end, event):
     if len(quote)<50:
         finish=min(len(text),begin+280)
         quote=text[begin:finish].strip()
-    return quote if 50<=len(quote)<=280 and text[start:end] in quote else None
+    if len(text.strip()) < 50:
+        quote = text.strip()
+    return quote if quote and len(quote)<=280 and text[start:end] in quote else None
 
 
 def sector(text):

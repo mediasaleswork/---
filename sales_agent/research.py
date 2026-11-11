@@ -23,6 +23,16 @@ class Deferred(Exception):
     pass
 
 
+def link_host(url):
+    try:
+        parts = urlsplit(url)
+        if parts.scheme == 'https' and not parts.username and not parts.password:
+            return (parts.hostname or '').lower()
+    except (TypeError, ValueError):
+        pass
+    return ''
+
+
 def validate(candidate, sources, now):
     if not isinstance(candidate, dict):
         return None
@@ -33,7 +43,7 @@ def validate(candidate, sources, now):
         return None
     company, quote = candidate["company"].strip(), candidate["evidence_quote"].strip()
     norm = lambda s: re.sub(r"\s+", " ", s).strip().casefold()
-    if not 2 <= len(company) <= 100 or not 50 <= len(quote) <= 280:
+    if not 2 <= len(company) <= 100 or len(quote)>280 or (len(quote)<50 and norm(quote)!=norm(source['text'])):
         return None
     if re.search(r"^(?:IT Park|Центр технологий будущего|Национальное агентство|Министерств|Правительств)", company, re.I):
         return None
@@ -54,8 +64,8 @@ def validate(candidate, sources, now):
     # An actual brand-domain link found in the source is a route to check, not a verified employee.
     name_key = re.sub(r"[^a-z0-9]", "", company.casefold())
     for url in json.loads(source.get("links") or "[]"):
-        host = urlsplit(url).hostname or ""
-        if len(name_key) >= 4 and name_key in host.replace("-", "").replace(".", "") and not host.endswith(("t.me", "telegram.me")):
+        host = link_host(url)
+        if len(name_key) >= 4 and name_key in {label.replace('-','') for label in host.split('.')}:
             lead["contact"] = url + " — ссылка из источника; проверить раздел контактов и получателя"
             break
     lead["scripts"] = scripts(lead)
@@ -65,19 +75,18 @@ def validate(candidate, sources, now):
 def enrich_contact(lead, source):
     """Follow a cited business article, never a model-invented URL or private source."""
     name = re.sub(r'[^a-z0-9]', '', lead['company'].casefold())
-    lead['contact']='Найти официальный сайт «'+lead['company']+'» → контакты отдела маркетинга; контакт ещё не проверен'
     if len(name) < 4:
         return lead
     urls = [source['url'], *json.loads(source.get('links') or '[]')]
     for url in urls[:4]:
-        host=(urlsplit(url).hostname or '').removeprefix('www.')
+        host=link_host(url).removeprefix('www.')
         if host not in {'spot.uz','gazeta.uz','uzdaily.uz','kun.uz'}:
             continue
         try:
             page=BeautifulSoup(fetch(url),'html.parser')
             for anchor in page.select('a[href]'):
                 target=anchor.get('href','')
-                domain=urlsplit(target).hostname or ''
+                domain=link_host(target)
                 words={re.sub(r'[^a-z0-9]','',w) for w in lead['company'].casefold().split() if len(w)>=4}
                 labels={p.replace('-','') for p in domain.split('.')}
                 if target.startswith('https://') and (name in labels or words.intersection(labels) or name==domain.replace('.','').replace('-','')):

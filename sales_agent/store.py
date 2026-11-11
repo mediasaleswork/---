@@ -40,6 +40,8 @@ class Store:
           CREATE TABLE IF NOT EXISTS source_health(url TEXT PRIMARY KEY,checked TEXT,status TEXT,detail TEXT);
           CREATE TABLE IF NOT EXISTS publications(lead_id TEXT,source_url TEXT,payload TEXT,created TEXT,
             PRIMARY KEY(lead_id,source_url));
+          CREATE TABLE IF NOT EXISTS publication_revisions(lead_id TEXT,source_url TEXT,payload TEXT,
+            PRIMARY KEY(lead_id,source_url,payload));
         """)
         self.db.execute('INSERT OR IGNORE INTO publications SELECT id,json_extract(payload,\'$.source_url\'),payload,created FROM leads')
         self.db.commit()
@@ -62,7 +64,11 @@ class Store:
     def add_source(self, item):
         sid = hashlib.sha256(item["url"].encode()).hexdigest()[:20]
         self.db.execute("""INSERT INTO sources(id,url,title,text,published,checked,origin,links)
-          VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET checked=excluded.checked""",
+          VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+            processed=CASE WHEN (sources.title,sources.text,sources.published,sources.links) IS NOT
+              (excluded.title,excluded.text,excluded.published,excluded.links) THEN 0 ELSE sources.processed END,
+            title=excluded.title,text=excluded.text,published=excluded.published,links=excluded.links,
+            origin=excluded.origin,checked=excluded.checked""",
           (sid, item["url"], item["title"], item["text"], item["published"], stamp(), item["origin"], json.dumps(item.get("links", []))))
         self.db.commit()
 
@@ -77,21 +83,30 @@ class Store:
     def add_lead(self, lead):
         key = normalized(lead["company"])
         existing=self.db.execute('SELECT id,payload FROM leads WHERE company_key=?',(key,)).fetchone()
-        if existing:
-            lead['id']=existing['id']
-            old=json.loads(existing['payload'])
-            with self.db:
-                self.db.execute('INSERT OR IGNORE INTO publications VALUES(?,?,?,?)',(lead['id'],lead['source_url'],json.dumps(lead,ensure_ascii=False),stamp()))
-                if lead['published']>old['published']:
-                    self.db.execute('UPDATE leads SET payload=? WHERE id=?',(json.dumps(lead,ensure_ascii=False),lead['id']))
-            return False
-        lead["id"] = "MS-" + hashlib.sha256(key.encode()).hexdigest()[:10].upper()
-        result = self.db.execute("INSERT OR IGNORE INTO leads VALUES(?,?,?,?)",
-            (lead["id"], key, json.dumps(lead, ensure_ascii=False), stamp()))
-        self.db.commit()
-        self.db.execute('INSERT OR IGNORE INTO publications VALUES(?,?,?,?)',(lead['id'],lead['source_url'],json.dumps(lead,ensure_ascii=False),stamp()))
-        self.db.commit()
-        return result.rowcount > 0
+        lead["id"] = existing["id"] if existing else "MS-" + hashlib.sha256(key.encode()).hexdigest()[:10].upper()
+        source = (lead['id'], lead['source_url'])
+        payload = json.dumps(lead, ensure_ascii=False)
+        with self.db:
+            previous = self.db.execute('SELECT payload FROM publications WHERE lead_id=? AND source_url=?', source).fetchone()
+            if previous:
+                old = json.loads(previous[0])
+                if {**old, 'checked': lead['checked']} == lead:
+                    return False
+                self.db.execute('INSERT OR IGNORE INTO publication_revisions VALUES(?,?,?)', (*source, previous[0]))
+                self.db.execute('UPDATE publications SET payload=? WHERE lead_id=? AND source_url=?', (payload, *source))
+            else:
+                self.db.execute('INSERT INTO publications VALUES(?,?,?,?)', (*source, payload, stamp()))
+            if not existing:
+                self.db.execute('INSERT INTO leads VALUES(?,?,?,?)', (lead['id'], key, payload, stamp()))
+            else:
+                # An edit can correct a date in either direction. Retain the latest source.
+                latest = self.db.execute("""SELECT payload FROM publications WHERE lead_id=?
+                    ORDER BY json_extract(payload,'$.published') DESC, created ASC LIMIT 1""", (lead['id'],)).fetchone()
+                self.db.execute('UPDATE leads SET payload=? WHERE id=?', (latest[0], lead['id']))
+        return existing is None
+
+    def publication_revisions(self):
+        return [json.loads(r[0]) for r in self.db.execute('SELECT payload FROM publication_revisions')]
 
     def leads(self):
         return [json.loads(r[0]) for r in self.db.execute("SELECT payload FROM leads ORDER BY created")]

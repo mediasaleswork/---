@@ -225,7 +225,7 @@ class SalesTests(unittest.TestCase):
             def api(self,method,path='',**kwargs):self.writes.append(kwargs['json']);return {}
         sheet=Fake();sheet.sync(self.store)
         writes=sheet.writes[-1]['data']
-        self.assertTrue(any(w['range']=="'Лиды'!E2:J2" and w['values'][0][4]==new['source_url'] for w in writes))
+        self.assertTrue(any(w['range']=="'Лиды'!I2" and w['values']==[[new['source_url']]] for w in writes))
         self.assertFalse(any("K2" in w['range'] or "O2" in w['range'] or "'Скрипты'!C2"==w['range'] for w in writes))
 
     def test_fresh_leads_sort_after_writes_with_all_team_columns(self):

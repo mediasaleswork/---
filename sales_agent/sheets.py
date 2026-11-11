@@ -106,19 +106,22 @@ class Sheets:
         scripts = self.read("Скрипты", "A1:F5000")
         versions=store.publications()
         latest={l['id']:l for l in store.leads()}
+        refreshed=False
         # A newer source refreshes the publication fields, while team-owned K:O stays intact.
         for index,row in enumerate(leads[1:],start=2):
             if not row or row[0] not in latest or len(row)<9:continue
             lead=latest[row[0]]
             old=next((v for v in versions if v['id']==row[0] and v['source_url']==row[8]),None)
             if old and row[8]!=lead['source_url']:
+                refreshed=True
                 current=(row+['']*17)[:17];target=lead_row(lead,self.timezone)
                 previous=lead_row(old,self.timezone)
-                block=current[4:10]
                 for column in range(4,10):
-                    if column in (5,8) or current[column]==previous[column]:block[column-4]=target[column]
-                writes.append({'range':f"'Лиды'!E{index}:J{index}",'values':[block]})
-                writes.append({'range':f"'Лиды'!P{index}:Q{index}",'values':[[target[15],target[16]]]})
+                    if (column in (5,8) or current[column]==previous[column]) and current[column]!=target[column]:
+                        writes.append({'range':f"'Лиды'!{chr(65+column)}{index}",'values':[[target[column]]]})
+                writes.append({'range':f"'Лиды'!P{index}",'values':[[target[15]]]})
+                if current[16]==previous[16] and current[16]!=target[16]:
+                    writes.append({'range':f"'Лиды'!Q{index}",'values':[[target[16]]]})
         for index,row in enumerate(scripts[1:],start=2):
             if not row or row[0] not in latest:continue
             for column,key in enumerate(['first','followup','call','objections'],start=2):
@@ -135,6 +138,10 @@ class Sheets:
             for l in store.leads() if l["id"] not in existing_scripts]
         if len(leads) + len(new_leads) >= 5000 or len(scripts) + len(new_scripts) >= 5000:
             raise ValueError("Workbook capacity reached; extend bounded sync ranges")
+        if new_leads or refreshed:
+            # Persist before any Google mutation. If values commit but the reply
+            # or later sort fails, the next sync/restart must still sort them.
+            store.set_state('lead_recent_first_v1','')
         if new_leads:
             writes.append({"range":f"'Лиды'!A{len(leads)+1}:Q{len(leads)+len(new_leads)}", "values":new_leads})
         if new_scripts:
@@ -190,7 +197,6 @@ class Sheets:
         self.api("POST", "/values:batchUpdate", json={"valueInputOption":"RAW", "data":writes})
         sorts=[publication_sort] if publication_sort else []
         lead_sheet=next((s for s in meta.get('sheets',[]) if s['properties']['title']=='Лиды'),None)
-        refreshed=any(w['range'].startswith("'Лиды'!E") for w in writes)
         if lead_sheet and len(leads)+len(new_leads)>2 and (new_leads or refreshed or not store.state('lead_recent_first_v1')):
             properties=lead_sheet['properties']
             # Sort complete rows only after all index-based writes, including CRM and extra team columns.

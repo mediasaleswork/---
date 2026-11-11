@@ -57,6 +57,11 @@ def advertising_brand(text,known):
     for pattern in subject_patterns:
         match=re.search(pattern,text[:1000])
         if match:return match.group('name'),match.start('name'),match.end('name')
+    # A name followed by the Uzbek "from" suffix in the opening offer
+    # identifies its issuer even when another CRM name occurs later.
+    issuer=re.match(r"^[\W_]*(?P<name>[A-Z][a-zA-Z0-9-]*(?:\s+[A-Z][a-zA-Z0-9-]*){0,3})['’‘ʻʼ]dan\b",text)
+    if issuer and not EXCLUDE.search(issuer.group('name')):
+        return issuer.group('name'),issuer.start('name'),issuer.end('name')
     # An explicitly named organiser is preferable to the title of the advertised exhibition.
     organiser=re.search(r'(?i:организован\w*|организатор\w*)\s+(?P<name>'+LATIN+r')',text)
     if organiser:
@@ -72,6 +77,8 @@ def advertising_brand(text,known):
     corporate=re.search(r'(?P<name>[A-Z][A-Za-z0-9-]*(?:\s+[A-Z][A-Za-z0-9-]*){0,2}\s+(?:Development|Buildings|Insurance|University))\b',text[:1000])
     if corporate and not re.search(r'\b(?:World University|Rankings)\b',corporate.group('name')):
         return corporate.group('name'),corporate.start('name'),corporate.end('name')
+    if re.search(r"so[ʻ‘’'ʼ]rovnoma\s+anonim\b",text,re.I):
+        return None
     for name,start,end in brands(text,known):
         if name.endswith('-') or name in {'IT','SOC','SIEM'}:continue
         if name.casefold() in {v.casefold() for v in known} and name not in AD_STOP and not re.search(r'\b(?:Index|Apple Pay|World University|Rankings)\b',name):
@@ -95,6 +102,7 @@ def advertising_brand(text,known):
 def brands(text, known):
     found=[]
     for name in known:
+        if name.casefold() in {'qanday','qaysi','qachon','kim','nima'}:continue
         match=re.search(r'(?<!\w)'+re.escape(name)+r'(?!\w)', text, re.I)
         if match:
             found.append((text[match.start():match.end()],match.start(),match.end()))

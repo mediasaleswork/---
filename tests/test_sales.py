@@ -498,6 +498,11 @@ class SalesTests(unittest.TestCase):
         self.assertEqual([r['url'] for r in parse_feed('<rss>'+body+'</rss>','news')],['https://example.uz/article'])
 
     def test_deferred_articles_keep_the_issuer_and_host_institution(self):
+        rules=RuleResearcher(['Qanday','Pepperoni'])
+        for body,expected in [
+            ("🔥 Bellissimo Pizza'dan yangi taklif — Pepperoni pitsa ilovada atigi 25 000 so‘m! Tushlikka rejalaringiz qanday? #reklama",['Bellissimo Pizza']),
+            ("Qanday bonuslar va imtiyozlar kundalik hayotingizda muhim? Soʻrovnoma anonim boʻlib, taxminan 5 daqiqa vaqt oladi. #reklama",[])]:
+            self.assertEqual([c['company'] for c in rules.classify([dict(self.source,text=body,title=body)],NOW)],expected)
         examples=[
             ('Турецкая OYAK рассматривает участие в проекте. Глава компании Мурат Ялчинташ обозначил направления для расширения сотрудничества.', 'OYAK'),
             ('Samarqanddagi “Ipak yo‘li” turizm va madaniy meros xalqaro universiteti Xitoyning Guilin Tourism University bilan hamkorlikda qabul e’lon qildi. Reklama','“Ipak yo‘li” turizm va madaniy meros xalqaro universiteti')]

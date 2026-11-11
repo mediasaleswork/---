@@ -68,9 +68,9 @@ def verify_history_preserved(reporter, posts, snapshots, metadata=None,manual_re
     post_urls = {p["id"]: p["url"] for p in posts}
     old_checks = {(r[0], str(r[4])) for r in history[1:] if len(r) > 4 and r[0]}
     checks = {(post_urls.get(s["post_id"]), str(s["due_key"])) for s in snapshots}
-    successful = {(r[0], str(r[4])) for r in history[1:] if len(r) > 6 and r[6] in {"ok", "success"}}
+    successful = {(r[0], str(r[4])) for r in history[1:] if len(r) > 6 and r[6] in {"ok", "success", "widget_placeholder"}}
     images = {(post_urls.get(s["post_id"]), str(s["due_key"])) for s in snapshots
-              if s.get("screenshot_status") in {"ok", "success"} and (valid_picture(s.get("screenshot_path")) or s.get("screenshot_url"))}
+              if s.get("screenshot_status") in {"ok", "success", "widget_placeholder"} and (valid_picture(s.get("screenshot_path")) or s.get("screenshot_url"))}
     if not old_posts.issubset(known) or not old_checks.issubset(checks) or not successful.issubset(images):
         raise ValueError("Защита истории: выгрузка потеряла сохранённые публикации, замеры или снимки; таблица не изменена")
     return successful
@@ -99,7 +99,7 @@ def restore_pictures(reporter, snapshots, scratch):
         path = snapshot.get("screenshot_path")
         if valid_picture(path):
             continue
-        if snapshot.get("screenshot_status") not in {"ok", "success"}:
+        if snapshot.get("screenshot_status") not in {"ok", "success", "widget_placeholder"}:
             continue
         match = re.fullmatch(r"https://drive\.google\.com/file/d/([A-Za-z0-9_-]+)/view(?:\?.*)?", snapshot.get("screenshot_url") or "")
         if not match:

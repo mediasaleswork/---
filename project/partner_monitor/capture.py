@@ -31,6 +31,10 @@ class UnavailableWidget(Exception):
     """The exact public message cannot be safely identified on the page."""
 
 
+class UnsupportedContent(UnavailableWidget):
+    """The public widget has a valid permalink but does not show the publication."""
+
+
 def _validate(username: str, message_ids: list[int]) -> list[int]:
     if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username):
         raise ValueError("Invalid public Telegram username")
@@ -129,6 +133,14 @@ class Screenshotter:
         actual = urlsplit(date_link or "")
         if actual.hostname != "t.me" or actual.path.rstrip("/").casefold() != f"/{username}/{message_id}".casefold():
             raise UnavailableWidget("Message timestamp links to a different post")
+        if await post.locator(".message_media_not_supported:visible, .message_media_view_in_telegram:visible").count():
+            raise UnsupportedContent("Telegram заменил содержимое поста кнопкой открытия в приложении")
+        content = post.locator(".tgme_widget_message_text:visible, .tgme_widget_message_photo_wrap:visible, "
+                               ".tgme_widget_message_video_player:visible, .tgme_widget_message_document:visible, "
+                               ".tgme_widget_message_poll:visible, .tgme_widget_message_voice_player:visible, "
+                               ".tgme_widget_message_sticker:visible, .tgme_widget_message_link_preview:visible")
+        if not await content.count():
+            raise UnsupportedContent("В веб-превью Telegram отсутствуют текст и вложения публикации")
         await post.scroll_into_view_if_needed()
         # Load actual images and CSS backgrounds before capturing; wait remains
         # bounded when Telegram serves slow media. Videos retain their poster.
@@ -197,6 +209,8 @@ class Screenshotter:
             return CaptureResult(str(final.resolve()), "ok")
         except asyncio.CancelledError:
             raise
+        except UnsupportedContent as exc:
+            return CaptureResult(None, "unsupported_content", str(exc))
         except UnavailableWidget as exc:
             return CaptureResult(None, "unavailable", str(exc))
         except Exception as exc:

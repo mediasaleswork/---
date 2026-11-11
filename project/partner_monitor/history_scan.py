@@ -142,7 +142,13 @@ async def history_loop(monitor):
     while True:
         try:
             raw=monitor.store.state('requested_channel_history','')
-            worked=await history_page(monitor,json.loads(raw)) if raw else False
+            worked = False
+            if raw:
+                from .history_forwards import verify_forward_origins
+                request = json.loads(raw)
+                worked = await history_page(monitor, request)
+                if not worked:
+                    worked = await verify_forward_origins(monitor, request)
         except Exception:
             log.exception('Загрузка истории отложена; сохранённая позиция сохранена')
             worked=False

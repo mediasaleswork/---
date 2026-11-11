@@ -119,6 +119,9 @@ class Store(AbstractContextManager):
         CREATE TABLE IF NOT EXISTS history_checks(
           run TEXT NOT NULL,job TEXT NOT NULL,PRIMARY KEY(run,job));
         CREATE INDEX IF NOT EXISTS history_check_job ON history_checks(job,run);
+        CREATE TABLE IF NOT EXISTS history_forward_matches(
+          run TEXT NOT NULL,source_mid INTEGER NOT NULL,channel_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+          PRIMARY KEY(run,source_mid));
         CREATE TABLE IF NOT EXISTS source_revisions (
           source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, revision_hash TEXT NOT NULL,
           payload TEXT NOT NULL, recorded_at TEXT NOT NULL,

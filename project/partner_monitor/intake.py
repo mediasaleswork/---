@@ -240,7 +240,7 @@ class ConversationIntake:
     def consume_forwarded(self, chat, message, content):
         text = content.text.strip()
         document = getattr(message, "document", None)
-        if document and not getattr(document, "mime_type", "").startswith(("image/", "video/")):
+        if document and not getattr(message, "fwd_from", None) and not getattr(document, "mime_type", "").startswith(("image/", "video/")):
             self._log(chat, message, content, None, [], "ignored")
             return
         if not (getattr(message, "fwd_from", None) or content.media) or not (text or content.media):

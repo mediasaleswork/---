@@ -35,7 +35,7 @@ def inline_picture(data):
     return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
 
 
-def card_html(title, messages, pictures, snapshot, url, timezone):
+def card_html(title, messages, pictures, snapshot, url, timezone, *, public=False):
     def local(value):
         date = datetime.fromisoformat(value) if isinstance(value, str) else value
         return html.escape(date.astimezone(ZoneInfo(timezone)).strftime("%d.%m.%Y %H:%M:%S"))
@@ -43,8 +43,14 @@ def card_html(title, messages, pictures, snapshot, url, timezone):
     for message in messages:
         picture = pictures.get(message.id)
         if picture:
-            for value in ([picture] if isinstance(picture,str) else picture):
+            images = [picture] if isinstance(picture, str) else picture
+            gallery = public and len(images) > 1
+            if gallery:
+                blocks.append('<div class="gallery">')
+            for value in images:
                 blocks.append('<img alt="Медиа публикации" src="' + value + '">')
+            if gallery:
+                blocks.append('</div>')
         text=message_content(message).text
         if text:
             blocks.append('<div class="text">' + html.escape(text) + '</div>')
@@ -52,15 +58,16 @@ def card_html(title, messages, pictures, snapshot, url, timezone):
             blocks.append('<div class="muted">Вложение Telegram; показана миниатюра, если доступна</div>')
         blocks.append('<div class="mid">Сообщение №' + str(message.id) + '</div>')
     views = snapshot.get("views")
+    label = 'КАРТОЧКА ПОСТА' if public else 'КАРТОЧКА ЗАКРЫТОГО ПОСТА'
     return '''<!doctype html><html lang="ru"><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
 <style>*{box-sizing:border-box}body{margin:0;padding:24px;background:#edf1f5;font-family:Arial,sans-serif;color:#182b3a}
 article{width:712px;background:white;border:1px solid #d8e0e6;border-radius:12px;overflow:hidden}
 header{padding:22px 24px;background:#eaf3fa;border-bottom:1px solid #d8e0e6}h1{font-size:23px;margin:9px 0 0;overflow-wrap:anywhere}
 .label{font-size:13px;color:#355e7a;font-weight:bold}.content{padding:24px}.text{font-size:19px;line-height:1.48;white-space:pre-wrap;overflow-wrap:anywhere;margin:16px 0}
-img{display:block;max-width:100%;max-height:1600px;height:auto;margin:auto}.mid,.muted{font-size:12px;color:#5e6e7b;margin:9px 0}
+img{display:block;max-width:100%;max-height:1600px;height:auto;margin:auto}.gallery{display:grid;grid-template-columns:1fr 1fr;gap:6px}.gallery img{width:100%;height:210px;object-fit:contain;background:#f6f8fa}.mid,.muted{font-size:12px;color:#5e6e7b;margin:9px 0}
 footer{padding:18px 24px;background:#f6f8fa;border-top:1px solid #d8e0e6;font-size:14px;line-height:1.65;overflow-wrap:anywhere}
-</style><article><header><div class="label">КАРТОЧКА ЗАКРЫТОГО ПОСТА · ДАННЫЕ TELEGRAM</div><h1>''' + html.escape(title) + '''</h1></header><div class="content">''' + "".join(blocks) + '''</div><footer>Опубликован: ''' + local(messages[0].date) + '''<br>Просмотры в замере: ''' + (str(views) if views is not None else "не предоставлены") + '''<br>Данные зафиксированы: ''' + local(snapshot["checked_at"]) + " (" + html.escape(timezone) + ")<br>" + html.escape(url) + '''<div class="muted">Карточка собрана из данных аккаунта Telegram. Это не снимок интерфейса Telegram.</div></footer></article></html>'''
+</style><article><header><div class="label">''' + label + ''' · ДАННЫЕ TELEGRAM</div><h1>''' + html.escape(title) + '''</h1></header><div class="content">''' + "".join(blocks) + '''</div><footer>Опубликован: ''' + local(messages[0].date) + '''<br>Просмотры в замере: ''' + (str(views) if views is not None else "не предоставлены") + '''<br>Данные зафиксированы: ''' + local(snapshot["checked_at"]) + " (" + html.escape(timezone) + ")<br>" + html.escape(url) + '''<div class="muted">Карточка собрана из данных аккаунта Telegram. Это не снимок интерфейса Telegram.</div></footer></article></html>'''
 
 
 async def capture_private_card(capture, client, partner, messages, snapshot, url, key, timezone):
@@ -82,7 +89,10 @@ async def capture_private_card(capture, client, partner, messages, snapshot, url
                             pictures.setdefault(message.id,[]).append(await asyncio.to_thread(inline_picture, buffer.getvalue()))
                         else:
                             raise ValueError("private_photo_unavailable")
-            markup = card_html(partner["title"], messages, pictures, snapshot, url, timezone)
+            if not any(message_content(m).text.strip() or pictures.get(m.id) for m in messages):
+                raise ValueError("publication_content_missing")
+            public = bool(partner.get("username"))
+            markup = card_html(partner["title"], messages, pictures, snapshot, url, timezone, public=public)
             page = await capture._context.new_page()
             await page.route("**/*", lambda route: route.abort())
             await page.set_content(markup, wait_until="load")
@@ -93,11 +103,13 @@ async def capture_private_card(capture, client, partner, messages, snapshot, url
             if not box or box["height"] > 30000:
                 raise ValueError("private_card_too_tall")
             digest = hashlib.sha256(str(key).encode()).hexdigest()[:24]
-            final = capture.output_dir / f"private-card-{digest}.png"
+            prefix = "post-card" if public else "private-card"
+            final = capture.output_dir / f"{prefix}-{digest}.png"
             temporary = final.with_suffix(".tmp.png")
             await article.screenshot(path=str(temporary), animations="disabled")
             os.replace(temporary, final)
-            return CaptureResult(str(final.resolve()), "ok", "Карточка закрытого поста из данных Telegram; не снимок интерфейса")
+            note = "Карточка поста" if public else "Карточка закрытого поста"
+            return CaptureResult(str(final.resolve()), "ok", note + " из данных Telegram; не снимок интерфейса")
     except asyncio.CancelledError:
         raise
     except Exception as exc:

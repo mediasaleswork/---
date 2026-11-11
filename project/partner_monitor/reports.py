@@ -102,7 +102,7 @@ def _google_tables(partners, posts, snapshots, timezone):
     best = {}
     for snapshot in _ordered(snapshots):
         if snapshot.get("screenshot_url") and snapshot.get("screenshot_status") not in {
-                "error", "failed", "invalid", "unavailable", "pending"}:
+                "error", "failed", "invalid", "unavailable", "pending", "widget_placeholder"}:
             best[snapshot["post_id"]] = snapshot
     clients_by_post = {}
     publications[0] = publications[0] + ["Клиент", "Язык", "Месяц", "Состояние",

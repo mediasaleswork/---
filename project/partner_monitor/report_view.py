@@ -25,7 +25,7 @@ def ordered(rows, field="checked_at"):
 
 def current_picture(checks):
     valid = [s for s in checks if s.get("screenshot_path") and Path(s["screenshot_path"]).is_file()
-             and s.get("screenshot_status") not in {"error", "failed", "invalid", "unavailable", "pending"}]
+             and s.get("screenshot_status") not in {"error", "failed", "invalid", "unavailable", "pending", "widget_placeholder"}]
     return ordered(valid, "screenshot_at")[-1] if valid else None
 
 
@@ -82,9 +82,10 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
             picture_note = latest.get("screenshot_error") or "Скриншот ещё не получен"
         elif latest.get("id") != picture.get("id"):
             picture_note = "Показан последний успешный снимок. Более поздний снимок недоступен."
-        is_card = bool(picture and str(picture.get("screenshot_error") or "").startswith("Карточка закрытого поста"))
+        card_note = str(picture.get("screenshot_error") or "") if picture else ""
+        is_card = card_note.startswith(("Карточка закрытого поста", "Карточка поста"))
         if is_card:
-            picture_note = ("Карточка закрытого поста из данных Telegram. " + picture_note).strip()
+            picture_note = (card_note.split(";")[0] + ". " + picture_note).strip()
         if post.get("evidence_note"):
             picture_note = (post["evidence_note"] + " " + picture_note).strip()
         if picture:

@@ -86,3 +86,20 @@ class HistoryTests(IsolatedAsyncioTestCase):
                       {'local_checked', 'offline_review'})
         self.assertFalse(self.judge.calls)
         self.assertFalse(await check_history_batch(self.monitor))
+
+    async def test_forward_proves_unavailable_original_without_copying_its_views(self):
+        from unittest.mock import AsyncMock
+        from partner_monitor.history_forwards import record_forward
+        self.batch(candidates=[message(7, 'Другие новости')])
+        await self.queue_only()
+        partner = self.store.rows('SELECT * FROM partners')[0]
+        placements = self.store.rows('SELECT * FROM placements')
+        forwarded = message(71, 'Реклама другого канала')
+        published = NOW - timedelta(days=5)
+        with patch.object(self.monitor.client, 'get_messages', new=AsyncMock(return_value=None)):
+            for _ in range(2):
+                await record_forward(self.monitor, partner, types.PeerChannel(200), 45, published, forwarded, placements)
+        rows = self.store.rows('SELECT message_id,status,published_at FROM posts')
+        self.assertEqual(rows, [dict(message_id=45, status='unavailable', published_at=published.isoformat())])
+        self.assertEqual(self.store.rows('SELECT * FROM snapshots'), [])
+        self.assertEqual(len(self.store.rows('SELECT * FROM placement_posts')), 1)

@@ -16,7 +16,7 @@ def widget(username="telegram", message_id=83, missing_footer=False):
     .text {{height:1500px;}} .tgme_widget_message_footer {{height:30px;}}
     </style></head><body><div data-post="{username}/{message_id}">
     <div class="tgme_widget_message_author">Telegram</div>
-    <div class="text">Real DOM fixture with a long publication</div>{footer}</div></body></html>'''
+    <div class="text tgme_widget_message_text">Real DOM fixture with a long publication</div>{footer}</div></body></html>'''
 
 
 class ValidationTests(unittest.TestCase):
@@ -94,6 +94,13 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         await self.route(widget(missing_footer=True))
         result = await self.capture.capture("telegram", [83], "incomplete")
         self.assertEqual(result.status, "unavailable")
+
+    async def test_open_in_telegram_prompt_is_not_evidence_even_with_correct_footer(self):
+        body = '<div class="message_media_not_supported">Please open Telegram to view this post</div>'
+        await self.route(widget().replace('<div class="text tgme_widget_message_text">Real DOM fixture with a long publication</div>', body))
+        result = await self.capture.capture("telegram", [83], "unsupported")
+        self.assertEqual(result.status, "unsupported_content")
+        self.assertIsNone(result.path)
 
     async def test_album_combines_real_widget_screenshots(self):
         from PIL import Image

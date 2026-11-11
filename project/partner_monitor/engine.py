@@ -156,9 +156,13 @@ class Monitor:
             post = self.store.rows("SELECT * FROM posts WHERE id=?", (post_id,))[0]
             ensure_jobs(self.store, post, self.config.milestones_hours)
             self.store.execute("UPDATE posts SET last_checked_at=?,unavailable_since=NULL,status='active',last_error=NULL WHERE id=?", (utcnow(), post_id))
-            for placement in placements:
-                self.store.execute("INSERT OR IGNORE INTO placement_posts VALUES (?,?)", (placement["id"], post_id))
-                self.store.execute("UPDATE placements SET status='found' WHERE id=?", (placement["id"],))
+            attributed = self.config.campaign_matching and self.store.rows(
+                'SELECT 1 FROM placement_posts WHERE post_id=? LIMIT 1', (post_id,))
+            if not attributed:
+                with self.store.transaction():
+                    for placement in placements:
+                        self.store.execute("INSERT OR IGNORE INTO placement_posts VALUES (?,?)", (placement["id"], post_id))
+                        self.store.execute("UPDATE placements SET status='found' WHERE id=?", (placement["id"],))
             if not self.store.rows("SELECT id FROM snapshots WHERE post_id=? AND due_key='initial'", (post_id,)):
                 post = self.store.rows("SELECT * FROM posts WHERE id=?", (post_id,))[0]
                 self.store.execute("""INSERT INTO snapshots(post_id,due_key,due_at,checked_at,views,screenshot_status)
@@ -185,6 +189,10 @@ class Monitor:
                 continue
             if self.config.campaign_matching:
                 known={p['message_id']:p['id'] for p in self.store.recorded_members(partner,messages)}
+                if known:
+                    from .campaigns import candidate_signature
+                    self.store.candidate_archive.observe(partner, messages, candidate_signature(messages))
+                    self.changed.set()
                 for m in messages:
                     if m.id in known:
                         self.store.execute('UPDATE posts SET text=?,telegram_channel_id=? WHERE id=?',(message_content(m).text,channel_id,known[m.id]))
@@ -437,16 +445,16 @@ class Monitor:
             key = f"post-{post['id']}-snapshot-{snapshot['id']}"
             if partner["username"]:
                 result = await self.capture.capture(partner["username"], json.loads(post["message_ids"]), key)
-            else:
+            if not partner["username"] or result.status == "unsupported_content":
                 from .capture import CaptureResult
                 from .private_card import capture_private_card
-                entity = await self.client.get_entity(types.PeerChannel(partner["private_channel_id"]))
+                entity = await self.client.get_entity(types.PeerChannel(partner["channel_id"]))
                 ids = json.loads(post["message_ids"])
                 members = await self.client.get_messages(entity, ids=ids)
                 members = sorted([m for m in members if isinstance(m, types.Message)
                                   and isinstance(m.peer_id, types.PeerChannel) and m.peer_id.channel_id == entity.id], key=lambda m: m.id)
                 if not isinstance(entity, types.Channel) or not entity.broadcast or entity.id != partner["channel_id"] or [m.id for m in members] != sorted(ids):
-                    result = CaptureResult(None, "unavailable", "Пост закрытого канала недоступен; прежняя карточка сохранена")
+                    result = CaptureResult(None, "unavailable", "Telegram не вернул оригинал публикации")
                 else:
                     result = await capture_private_card(self.capture, self.client, partner, members, snapshot, post["url"], key, self.config.timezone)
             self.store.execute("""UPDATE snapshots SET screenshot_path=?,screenshot_status=?,screenshot_error=?,
@@ -466,6 +474,11 @@ class Monitor:
             existing = self.store.rows("SELECT * FROM snapshots WHERE post_id=?", (post["id"],))
             jobs = ready_jobs(self.store, post["id"], datetime.now(timezone.utc))
             due = [(j["due_key"], j["due_at"]) for j in jobs]
+            rejected = [s['id'] for s in existing if s['screenshot_status'] == 'widget_placeholder']
+            if rejected:
+                repair = f'correction-{max(rejected)}'
+                if not any(s['due_key'] == repair for s in existing):
+                    due.append((repair, utcnow()))
             now = datetime.now(timezone.utc)
             placements = self.store.rows("""SELECT p.* FROM placements p JOIN placement_posts x ON x.placement_id=p.id
               WHERE x.post_id=? AND p.retention_hours IS NOT NULL AND p.status!='dismissed'""", (post["id"],))

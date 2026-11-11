@@ -107,6 +107,7 @@ class CandidateArchive:
         self.reserved={}
         self.wake=asyncio.Event()
         self.reporter=None
+        self.upload_turn=0
 
     def path(self,key):
         return self.root/hashlib.sha256(key.encode()).hexdigest()
@@ -227,12 +228,13 @@ class CandidateArchive:
             self.reserved.pop(key,None)
             temp.unlink(missing_ok=True)
 
-    async def process_one(self,upload=False,realtime=False):
+    async def process_one(self,upload=False,realtime=False,text_only=False):
         cfg=self.monitor.config
         if upload and (not cfg.google_credentials or not cfg.drive_folder_id):return False
-        if not upload and not getattr(self.monitor,'scope_ready',True):return False
+        if not upload and not text_only and not getattr(self.monitor,'scope_ready',True):return False
         now=utcnow()
         where="saved!='' AND drive_id='' AND upload_retry<=?" if upload else "saved='' AND retry<=?"
+        if text_only:where+=" AND key LIKE 'post:%'"
         if upload and self.store.state('candidate_upload_pause','')>now:return False
         rows=[]
         if realtime:
@@ -240,11 +242,15 @@ class CandidateArchive:
                 WHERE f.saved='' AND f.retry<=? ORDER BY q.seen DESC LIMIT 8""",(now,))
             # Keep capacity for a live post; only help the history worker with small files.
             where+=" AND (key LIKE 'post:%' OR key LIKE 'photo:%' OR expected BETWEEN 1 AND 1048576)"
-        rows+=self.store.rows('SELECT * FROM candidate_files WHERE '+where+
-                              ' ORDER BY '+('saved' if upload else "(key LIKE 'post:%'),rowid")+' LIMIT 8',(now,))
+        if upload:
+            # Keep originals moving even during a large burst of text manifests.
+            order="(key LIKE 'post:%') "+('DESC' if self.upload_turn%2 else 'ASC')+', saved'
+        else:order="(key LIKE 'post:%'),rowid"
+        rows+=self.store.rows('SELECT * FROM candidate_files WHERE '+where+' ORDER BY '+order+' LIMIT 8',(now,))
         row=next((r for r in rows if r['key'] not in self.busy),None)
         if not row:return False
         key=row['key'];self.busy.add(key)
+        if upload:self.upload_turn+=1
         try:
             if upload:
                 from .candidate_drive import upload_file
@@ -274,9 +280,9 @@ class CandidateArchive:
         finally:self.busy.discard(key)
         return True
 
-    async def run(self,upload=False,realtime=False):
+    async def run(self,upload=False,realtime=False,text_only=False):
         while True:
             self.wake.clear()
-            if await self.process_one(upload,realtime):continue
+            if await self.process_one(upload,realtime,text_only):continue
             try:await asyncio.wait_for(self.wake.wait(),timeout=5)
             except asyncio.TimeoutError:pass

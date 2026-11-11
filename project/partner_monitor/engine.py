@@ -598,8 +598,8 @@ async def run(config: Config, *, once: bool = False):
                     if monitor.campaign_worker:
                         monitor.campaign_background = True
                         archive=store.candidate_archive
-                        archivers=[asyncio.create_task(archive.run(upload,realtime))
-                                   for upload,realtime in ((False,True),(False,False),(True,False))]
+                        archivers=[asyncio.create_task(archive.run(realtime=True)),asyncio.create_task(archive.run()),
+                                   asyncio.create_task(archive.run(text_only=True)),asyncio.create_task(archive.run(upload=True))]
                         from .campaigns import campaign_loop
                         campaign_task = asyncio.create_task(campaign_loop(monitor))
                 try:

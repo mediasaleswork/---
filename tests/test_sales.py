@@ -7,7 +7,7 @@ from unittest.mock import patch
 from sales_agent.config import Config
 from sales_agent.research import validate, Deferred
 from sales_agent.rules import RuleResearcher
-from sales_agent.runner import cycle, due
+from sales_agent.runner import cycle, due, saved_queue_due
 from sales_agent.sheets import Sheets, LEAD_HEADERS, SCRIPT_HEADERS, lead_row, script_row_moves
 from sales_agent.sources import parse_feed, parse_telegram, relevant
 from sales_agent.store import Store
@@ -80,6 +80,30 @@ class SalesTests(unittest.TestCase):
         self.store.set_state('last_researched',NOW.isoformat())
         self.assertFalse(due(self.store,self.cfg,NOW))
         self.assertTrue(due(self.store,self.cfg,NOW+timedelta(minutes=15)))
+
+    def test_cap_drains_between_scans_and_does_not_delay_fresh_feed(self):
+        body=TEXT.replace('TestBrand','OtherBrand')
+        self.store.add_source(dict(url='https://t.me/spotuz/124',title=body,text=body,
+            published=NOW.isoformat(),origin='test',links=[]))
+        class Brands:
+            def classify(_,batch,now):
+                return [dict(candidate(r['id']), company=r['text'].split()[1], evidence_quote=r['text']) for r in batch]
+        def collect_stub(cfg,store,now):
+            store.source_health('test','ok','2')
+            return 2
+        with patch('sales_agent.runner.collect',side_effect=collect_stub) as fetch:
+            first=cycle(self.cfg,self.store,now=NOW,researcher=Brands())
+            self.assertEqual(first['new_leads'],1)
+            self.store.close()
+            self.store=Store(self.root/'sales.db')
+            later=NOW+timedelta(minutes=5)
+            self.assertTrue(saved_queue_due(self.store,self.cfg,later))
+            second=cycle(self.cfg,self.store,now=later,researcher=Brands(),collect_sources=False)
+            self.assertEqual(second['new_leads'],1)
+            self.assertFalse(saved_queue_due(self.store,self.cfg,later))
+            self.assertTrue(due(self.store,self.cfg,NOW+timedelta(minutes=15)))
+            self.assertEqual(fetch.call_count,1)
+            self.assertEqual(len(self.store.publications()),2)
 
     def test_rss_uses_real_dates_and_html_text(self):
         rss='<rss><channel><item><title>TestBrand открыла магазин</title><link>https://news.example/1</link><pubDate>Mon, 09 Nov 2026 05:00:00 GMT</pubDate><description>&lt;p&gt;Новый магазин&lt;/p&gt;</description></item><item><title>Без даты</title><link>https://news.example/2</link></item></channel></rss>'

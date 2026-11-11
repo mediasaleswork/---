@@ -65,6 +65,7 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
         known={normalized(company) for company in companies}
         researcher = researcher or RuleResearcher(companies)
         had_candidates=False
+        capped=False
         for batch in pending_batches(store,since,cfg.batch_size,oldest_first=run%2==0):
             had_candidates=True
             candidates = researcher.classify(batch, now)
@@ -89,6 +90,7 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
                     key=normalized(lead['company'])
                     if new_count >= cfg.max_leads and key not in known:
                         overflow.add(candidate["source_id"])
+                        capped=True
                     else:
                         lead=enrich_contact(lead,sources[candidate['source_id']])
                         if article_url:=sources[candidate['source_id']].get('article_url'):
@@ -105,19 +107,30 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
         if not available:
             status="error"
             detail += "; ни один источник не ответил в этом цикле"
+        store.set_state('drain_after_cap', '1' if capped else '0')
+        if not collect_sources:
+            detail += "; обработана сохранённая очередь без повторного обхода каналов"
     except Deferred as exc:
         status, detail = "deferred", str(exc)
     except Exception as exc:
         status, detail = "error", type(exc).__name__ + "; очередь и подготовленные лиды сохранены"
     store.db.execute("UPDATE runs SET finished=?,status=?,sources=?,leads=?,detail=? WHERE id=?", (stamp(),status,count,new_count,detail,run))
     store.db.commit()
-    store.set_state("last_researched", now.isoformat())
+    if collect_sources:
+        store.set_state("last_researched", now.isoformat())
     return {"status":status, "sources":count, "new_leads":new_count, "new_publications":store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]-publications_before, "detail":detail}
 
 
 def due(store, cfg, now):
     last=store.state('last_researched')
     return not last or now-datetime.fromisoformat(last)>=timedelta(minutes=cfg.scan_interval_minutes)
+
+
+def saved_queue_due(store, cfg, now):
+    if store.state('drain_after_cap','1')!='1':
+        return False
+    since=(now-timedelta(days=cfg.lookback_days)).isoformat()
+    return store.db.execute('SELECT 1 FROM sources WHERE processed=0 AND published>=? LIMIT 1',(since,)).fetchone() is not None
 
 
 def run(cfg, once=False):
@@ -154,12 +167,13 @@ def run_locked(cfg, once):
                 paused = bool(paused and paused[0] and str(paused[0][0]).strip().casefold() in {"true","да","пауза","1"})
                 retry_at = store.state("next_retry")
                 retry_due = retry_at and datetime.fromisoformat(retry_at) <= now
-                if not paused and (once or due(store, cfg, now) or retry_due):
-                    result = cycle(cfg, store, now=now)
+                scan = once or due(store, cfg, now) or bool(retry_due)
+                if not paused and (scan or saved_queue_due(store,cfg,now)):
+                    result = cycle(cfg, store, now=now,collect_sources=scan)
                     log.info("Mediasales: %s", json.dumps(result,ensure_ascii=False))
                     if result["status"] != "ok":
                         store.set_state("next_retry",(now+timedelta(minutes=5)).isoformat())
-                    else:
+                    elif scan:
                         store.set_state("next_retry", "")
                 # Retry Google writes independently of source collection.
                 sheet.sync(store)

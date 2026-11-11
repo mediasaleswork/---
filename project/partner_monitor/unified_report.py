@@ -334,7 +334,12 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         # than silently following the newest preview in the main report.
         if snap.get("screenshot_url"):
             cell = history_sheet.cell(row, 7)
-            cell.value = "Снимок: " + ("сразу" if snap["due_key"] == "initial" else snap["due_key"])
+            if snap.get("screenshot_status") == "widget_placeholder":
+                cell.value = "Архив отклонённого изображения"
+            elif snap["due_key"].startswith("correction-"):
+                cell.value = "Повторная съёмка" if not str(snap.get("screenshot_error") or "").startswith("Карточка") else "Карточка из данных Telegram"
+            else:
+                cell.value = "Снимок: " + ("сразу" if snap["due_key"] == "initial" else snap["due_key"])
             cell.hyperlink = snap["screenshot_url"]
         else:
             jump(history_sheet.cell(row, 7), "Отчёт", f"A{anchors[post['id']]}", "Текущий снимок")

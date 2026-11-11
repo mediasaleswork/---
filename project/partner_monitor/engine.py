@@ -613,8 +613,9 @@ async def run(config: Config, *, once: bool = False):
                         archive=store.candidate_archive
                         archivers=[asyncio.create_task(archive.run(realtime=True)),asyncio.create_task(archive.run()),
                                    asyncio.create_task(archive.run(text_only=True)),asyncio.create_task(archive.run(upload=True))]
-                        from .history_scan import history_loop
+                        from .history_scan import historical_comparisons, history_loop
                         archivers.append(asyncio.create_task(history_loop(monitor)))
+                        archivers.append(asyncio.create_task(historical_comparisons(monitor)))
                         from .campaigns import campaign_loop
                         campaign_task = asyncio.create_task(campaign_loop(monitor))
                 try:

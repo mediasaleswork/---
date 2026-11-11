@@ -95,7 +95,7 @@ async def commit(worker, candidate, value, messages):
         return
     if candidate_signature(messages) != job['candidate_signature']:
         worker.finish(job, 'obsolete', 'Публикация изменилась; проверим новую версию')
-        enqueue(worker.store, worker.config, partner, messages, latest)
+        enqueue(worker.store, worker.config, partner, messages, latest, replaces=job['id'])
         return
     status = validate_decision(value, [p['id'] for p in latest])
     if status == 'match':
@@ -118,7 +118,9 @@ async def prepare(worker, group, ai_ready, offline=''):
         if not partner or partner['status'] != 'active':
             continue
         try:
-            entity = await worker.monitor.client.get_entity(partner['username'] or types.PeerChannel(partner['private_channel_id']))
+            entity = getattr(worker.monitor, 'history_entities', {}).get(partner['channel_id'])
+            if entity is None:
+                entity = await worker.monitor.client.get_entity(partner['username'] or types.PeerChannel(partner['private_channel_id']))
             if entity.id != partner['channel_id']:
                 for job in jobs:
                     worker.finish(job, 'obsolete', 'Канал изменился; нужна проверка')
@@ -159,7 +161,7 @@ async def prepare(worker, group, ai_ready, offline=''):
                 continue
             if candidate_signature(messages) != job['candidate_signature']:
                 worker.finish(job, 'obsolete', 'Публикация отредактирована; проверим новую версию')
-                enqueue(worker.store, worker.config, partner, messages, own)
+                enqueue(worker.store, worker.config, partner, messages, own, replaces=job['id'])
                 continue
             if len(worker.store.recorded_members(partner,messages))==len(messages):
                 worker.finish(job, 'obsolete', 'Публикация уже учтена')

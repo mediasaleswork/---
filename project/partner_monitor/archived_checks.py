@@ -92,7 +92,15 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
     archive=getattr(worker.store,'candidate_archive',None)
     value=saved_caption(job,partner,0 if files else 40)
     if not value or not callable(getattr(type(worker.judge),'compare_archived',None)):return None
-    if not any(datetime.fromisoformat(p['starts_at'])<=datetime.fromisoformat(value['published_at'])<datetime.fromisoformat(p['ends_at']) for p in placements):return None
+    published = datetime.fromisoformat(value['published_at'])
+    in_window = any(datetime.fromisoformat(p['starts_at']) <= published < datetime.fromisoformat(p['ends_at'])
+                    for p in placements)
+    if not in_window:
+        request = json.loads(worker.store.state('requested_channel_history', '{}'))
+        included = worker.store.rows('SELECT 1 FROM history_checks WHERE run=? AND job=?',
+                                     (request.get('id'), job['id']))
+        if not included or not datetime.fromisoformat(request['start']) <= published <= datetime.fromisoformat(request['end']):
+            return None
     visuals=await asyncio.to_thread(image_parts,archive,files) if archive and files else []
     if not value['text'].strip() and not visuals:return None
     signature=digest([job['source_signature'],value]+([visuals] if visuals else []))
@@ -146,7 +154,7 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
         return 'requested'
     if len(returned)==len(json.loads(job['message_ids'])):
         worker.finish(job,'obsolete','Публикация снова доступна; проверим текущую версию')
-        enqueue(store,worker.config,partner,returned,latest)
+        enqueue(store,worker.config,partner,returned,latest,replaces=job['id'])
         # A reappeared identical version has the same key; revive its job.
         ident=digest([partner['id'],sorted(m.id for m in returned),source_signature(latest,model_identity(worker.config)),candidate_signature(returned)])
         store.execute("UPDATE campaign_checks SET status='pending',next_try_at=? WHERE id=? AND status='obsolete'",(utcnow(),ident))

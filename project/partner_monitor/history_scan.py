@@ -73,8 +73,14 @@ async def history_page(monitor,request):
             partner=store.rows('SELECT * FROM partners WHERE id=?',(task['partner_id'],))[0]
             if not monitor.config.permits(PartnerReference(partner['username'],private_channel_id=partner.get('private_channel_id'))):
                 raise ValueError('Канал больше не в подключённой папке')
-            entity=await monitor.client.get_entity(types.PeerChannel(peer))
-            if entity.id!=peer or not getattr(entity,'broadcast',False):raise ValueError('Изменилась идентичность канала')
+            if not hasattr(monitor, 'history_entities'):
+                monitor.history_entities = {}
+            entity = monitor.history_entities.get(peer)
+            if entity is None:
+                entity = await monitor.client.get_entity(types.PeerChannel(peer))
+                if entity.id != peer or not getattr(entity, 'broadcast', False):
+                    raise ValueError('Изменилась идентичность канала')
+                monitor.history_entities[peer] = entity
             # The fixed retrospective interval also covers days before a sample was forwarded.
             # Live placement windows and their seven-day deadline are kept independently.
             placements=store.rows("""SELECT p.* FROM placements p WHERE p.partner_id=? AND p.source_chat_id=?
@@ -83,6 +89,11 @@ async def history_page(monitor,request):
             options={'offset_id':task['cursor']} if task['cursor'] else {'offset_date':end+timedelta(seconds=1)}
         size=100
         page=[m async for m in monitor.client.iter_messages(entity,limit=size,**options)]
+        albums = {}
+        for item in page:
+            if isinstance(item, types.Message) and item.grouped_id:
+                albums.setdefault(item.grouped_id, []).append(item)
+        low, high = sorted((page[0].id, page[-1].id)) if page else (0, 0)
         boundary=False
         handled=set()
         for message in page:
@@ -96,7 +107,12 @@ async def history_page(monitor,request):
                 if tag not in handled:
                     already=store.rows('SELECT 1 FROM history_seen WHERE run=? AND peer=? AND mid=?',(run,peer,message.id))
                     if not already:
-                        members=await monitor.album(entity,message) if album else [message]
+                        if album and (message.id - 9 < low or message.id + 9 > high):
+                            members = await monitor.album(entity, message)
+                        elif album:
+                            members = sorted(albums[album], key=lambda item: item.id)
+                        else:
+                            members = [message]
                         members=[m for m in members if start<=m.date<=end]
                         if members:
                             if is_group:
@@ -131,3 +147,42 @@ async def history_loop(monitor):
             log.exception('Загрузка истории отложена; сохранённая позиция сохранена')
             worked=False
         await asyncio.sleep(0.35 if worked else 5)
+
+
+async def check_history_batch(monitor):
+    """Use the existing offline comparison while the provider handles other jobs."""
+    from .campaign_batching import prepare
+    from .campaign_local import check_candidate
+
+    if not monitor.scope_ready or not monitor.source_peer_id:
+        return False
+    worker = monitor.campaign_worker
+    jobs = monitor.store.rows("""
+        SELECT j.* FROM campaign_checks j JOIN partners p ON p.id=j.partner_id
+        WHERE EXISTS (SELECT 1 FROM history_checks h WHERE h.job=j.id)
+          AND p.status='active' AND j.status='pending' AND j.attempts=0
+          AND j.next_try_at<=? AND j.provisional_decision=''
+        ORDER BY j.partner_id,j.priority,j.created_at LIMIT 48""", (utcnow(),))
+    jobs = [j for j in jobs if j['id'] not in getattr(worker, 'batch_busy', ())]
+    if not jobs:
+        return False
+    worker.history_busy = {job['id'] for job in jobs}
+    try:
+        ready, _ = await prepare(worker, jobs, ai_ready=False, offline='history')
+        for candidate in ready:
+            await check_candidate(worker, candidate, 'historical_replay')
+            worker.history_busy.discard(candidate.job['id'])
+            await asyncio.sleep(0)
+    finally:
+        worker.history_busy.clear()
+    return True
+
+
+async def historical_comparisons(monitor):
+    while True:
+        try:
+            worked = await check_history_batch(monitor)
+        except Exception:
+            log.exception('Историческая сверка отложена. Задания сохранены')
+            worked = False
+        await asyncio.sleep(0.5 if worked else 10)

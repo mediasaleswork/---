@@ -6,6 +6,7 @@ eligible for an additional semantic check, and never proves a missing placement.
 import asyncio
 import base64
 from difflib import SequenceMatcher
+from functools import lru_cache
 import hashlib
 import io
 import json
@@ -126,19 +127,19 @@ def video_ids(text, links=()):
     return result
 
 
+@lru_cache(maxsize=32)
+def image_fingerprint(url):
+    raw = base64.b64decode(url.split(',', 1)[1], validate=True)
+    with Image.open(io.BytesIO(raw)) as image:
+        if min(image.size) < 64 or ImageStat.Stat(image.convert('L')).stddev[0] < 12:
+            return None
+        rgb = image.convert('RGB')
+        return hashlib.sha256(str(rgb.size).encode() + rgb.tobytes()).hexdigest()
+
+
 def image_fingerprints(parts):
-    result = set()
-    for part in parts:
-        if part.get('type') != 'input_image':
-            continue
-        raw = base64.b64decode(part['image_url'].split(',', 1)[1], validate=True)
-        with Image.open(io.BytesIO(raw)) as image:
-            # Solid backgrounds and tiny icons do not identify an advertisement.
-            if min(image.size) < 64 or ImageStat.Stat(image.convert('L')).stddev[0] < 12:
-                continue
-            rgb = image.convert('RGB')
-            result.add(hashlib.sha256(str(rgb.size).encode() + rgb.tobytes()).hexdigest())
-    return result
+    return {value for part in parts if part.get('type') == 'input_image'
+            if (value := image_fingerprint(part['image_url'])) is not None}
 
 
 async def check_candidate(worker, candidate, reason):
@@ -214,7 +215,7 @@ async def check_candidate(worker, candidate, reason):
             return
         if candidate_signature(messages) != job['candidate_signature']:
             worker.finish(job, 'obsolete', 'Публикация изменилась во время локальной проверки')
-            enqueue(worker.store, worker.config, partner, messages, placements)
+            enqueue(worker.store, worker.config, partner, messages, placements, replaces=job['id'])
             return
         partner, placements = current(worker, job)
         if not partner or partner['status']!='active' or not getattr(worker.monitor, 'scope_ready', True):

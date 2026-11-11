@@ -101,9 +101,13 @@ def candidate_signature(messages):
     return digest(parts)
 
 
-def enqueue(store, config, partner, messages, placements):
+def enqueue(store, config, partner, messages, placements, *, replaces=None):
     with store.transaction():
-        return _enqueue(store,config,partner,messages,placements)
+        ident = _enqueue(store, config, partner, messages, placements)
+        if replaces and ident:
+            store.execute('INSERT OR IGNORE INTO history_checks SELECT run,? FROM history_checks WHERE job=?',
+                          (ident, replaces))
+        return ident
 
 
 def _enqueue(store, config, partner, messages, placements):
@@ -339,9 +343,18 @@ class CampaignWorker:
     async def images(self, messages):
         result = []
         for message in messages:
-            for _,target in visual_sources(message):
+            for asset,target in visual_sources(message):
                 if len(result)==2:return result
                 if target is None:raise CampaignAPIError('media_unavailable')
+                archive = getattr(self.store, 'candidate_archive', None)
+                if archive and asset.startswith('photo:'):
+                    files = self.store.rows("SELECT * FROM candidate_files WHERE key=? AND saved<>''", (asset,))
+                    if files:
+                        from .candidate_archive import image_parts
+                        saved = await asyncio.to_thread(image_parts, archive, files)
+                        if saved:
+                            result.extend(saved)
+                            continue
                 with LimitedBuffer() as buffer:
                     await self.monitor.client.download_media(target,file=buffer,thumb=-1)
                     if not buffer.getvalue():raise CampaignAPIError('media_unavailable')
@@ -451,10 +464,9 @@ class CampaignWorker:
                     continue
                 if candidate_signature(messages) != job["candidate_signature"]:
                     self.finish(job, "obsolete", "Публикация отредактирована; проверим её новую версию")
-                    enqueue(self.store, self.config, partner, messages, placements)
+                    enqueue(self.store, self.config, partner, messages, placements, replaces=job['id'])
                     continue
-                recorded = self.store.rows("SELECT message_ids FROM posts WHERE partner_id=?", (partner["id"],))
-                if any(set(m.id for m in messages).intersection(json.loads(p["message_ids"])) for p in recorded):
+                if len(self.store.recorded_members(partner, messages)) == len(messages):
                     self.finish(job, "obsolete", "Публикация уже учтена; повторный зачёт не требуется")
                     continue
                 content = []
@@ -485,7 +497,7 @@ class CampaignWorker:
                 if candidate_signature(refreshed) != job["candidate_signature"]:
                     self.finish(job, "obsolete", "Публикация изменилась во время распознавания")
                     if len(refreshed) == len(messages):
-                        enqueue(self.store, self.config, partner, refreshed, latest)
+                        enqueue(self.store, self.config, partner, refreshed, latest, replaces=job['id'])
                     continue
                 if status == "match":
                     chosen = next(p for p in placements if p["id"] == value["campaign_id"])

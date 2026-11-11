@@ -32,7 +32,11 @@ def reconcile(store):
     # remain visible after the original uncertain result changes.
     for job in store.rows("""SELECT j.id,j.status,j.reason,j.decision FROM campaign_checks j
       LEFT JOIN campaign_reviews r ON r.job_id=j.id
-      WHERE j.status IN ('local_checked','offline_review','review','unavailable','archived_no_match','error') OR r.job_id IS NOT NULL"""):
+      LEFT JOIN campaign_review_events e ON e.id=(
+        SELECT max(id) FROM campaign_review_events WHERE job_id=j.id)
+      WHERE (j.status IN ('local_checked','offline_review','review','unavailable','archived_no_match','error') OR r.job_id IS NOT NULL)
+        AND (e.id IS NULL OR e.status<>j.status OR e.reason<>substr(j.reason,1,1500)
+             OR e.decision<>coalesce(j.decision,''))"""):
         try:value=json.loads(job['decision']) if job['decision'] else None
         except (ValueError,TypeError):value=None
         observe(store,job['id'],job['status'],job['reason'],value)

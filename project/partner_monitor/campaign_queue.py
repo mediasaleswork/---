@@ -42,9 +42,12 @@ def maintain_queue(worker):
         store.execute("UPDATE campaign_checks SET status='unavailable',next_try_at=? WHERE status='review' AND reason='Публикация недоступна; совпадение не засчитано'",(utcnow(),))
         store.set_state('campaign_unavailable_retry_v1',utcnow())
     groups={}
-    for job in store.rows("SELECT * FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match','local_checked','offline_review','review') ORDER BY created_at DESC"):
-        partner,placements=current(worker,job)
-        if not partner:
+    valid_sources = {}
+    for job in store.rows("SELECT id,partner_id,placement_ids,source_signature,message_ids,candidate_signature FROM campaign_checks WHERE status IN ('pending','error','unavailable','archived_no_match','local_checked','offline_review','review') ORDER BY created_at DESC"):
+        source = job['partner_id'], job['placement_ids'], job['source_signature']
+        if source not in valid_sources:
+            valid_sources[source] = bool(current(worker, job)[0])
+        if not valid_sources[source]:
             worker.finish(job,'obsolete','Настройки, материал или область наблюдения изменились')
             continue
         key=(job['partner_id'],job['message_ids'],job['candidate_signature'])
@@ -55,6 +58,8 @@ def maintain_queue(worker):
             ids=set(json.loads(job['placement_ids']))
             covering=next((k for k in keep if ids<=set(json.loads(k['placement_ids']))),None)
             if covering:
+                store.execute('INSERT OR IGNORE INTO history_checks SELECT run,? FROM history_checks WHERE job=?',
+                              (covering['id'], job['id']))
                 worker.finish(job,'obsolete','Повтор той же версии публикации; полная проверка '+covering['id'][:12])
             else:keep.append(job)
     save_status(worker)
@@ -162,12 +167,18 @@ async def process_batch(worker):
             if not ai_ready and not offline:
                 jobs=[j for j in jobs if j.get('provisional_decision') or j['status']=='archived_no_match'
                     or j['status']=='unavailable' and not caption_payload(j)]
+            jobs = [j for j in jobs if j['id'] not in getattr(worker, 'history_busy', ())]
             if not jobs:return
             turn=int(store.state('campaign_queue_turn'))
             group=choose_group(worker,jobs,turn)
             if not group:return
             store.set_state('campaign_queue_turn',turn+1)
-            if not await process_group(worker,group,ai_ready,offline):return
+            worker.batch_busy = {j['id'] for j in group}
+            try:
+                if not await process_group(worker, group, ai_ready, offline):
+                    return
+            finally:
+                worker.batch_busy.clear()
     finally:
         settle_placements(worker)
         save_status(worker)

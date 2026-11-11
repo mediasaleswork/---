@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 from telethon import types
-from partner_monitor.history_scan import check_publication,history_page
+from partner_monitor.history_scan import check_history_batch,check_publication,history_page
 from partner_monitor.parsing import PartnerReference
 from partner_monitor.unified_report import export_unified
 import test_campaign_queue as queue
@@ -71,3 +71,18 @@ class HistoryTests(IsolatedAsyncioTestCase):
             self.assertFalse(await history_page(self.monitor,req))
         self.assertEqual(self.store.rows('SELECT SUM(done) n FROM history_pages')[0]['n'],2)
         self.assertEqual(len(self.store.rows('SELECT * FROM history_seen')),2)
+
+    async def test_history_and_live_workers_do_not_check_the_same_job_concurrently(self):
+        self.batch(candidates=[message(7, 'Другие новости')])
+        await self.queue_only()
+        self.monitor.scope_ready = True
+        job = self.store.rows('SELECT id FROM campaign_checks')[0]['id']
+        self.store.execute('INSERT INTO history_checks VALUES (?,?)', ('history', job))
+        self.monitor.campaign_worker.batch_busy = {job}
+        self.assertFalse(await check_history_batch(self.monitor))
+        self.monitor.campaign_worker.batch_busy.clear()
+        self.assertTrue(await check_history_batch(self.monitor))
+        self.assertIn(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],
+                      {'local_checked', 'offline_review'})
+        self.assertFalse(self.judge.calls)
+        self.assertFalse(await check_history_batch(self.monitor))

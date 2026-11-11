@@ -22,6 +22,30 @@ class Deferred(Exception):
     pass
 
 
+def sponsored_article(source):
+    from .rules import is_advertisement
+    import requests
+    if source['origin'].casefold()!='telegram @kptluz' or not is_advertisement(source['text']):
+        return None
+    url=next((u for u in json.loads(source['links']) if link_host(u) in {'kapital.uz','www.kapital.uz'}),None)
+    if not url:return None
+    try:
+        page=BeautifulSoup(fetch(url),'html.parser')
+    except (requests.RequestException,OSError,ValueError) as exc:
+        raise Deferred("Статья издателя временно недоступна") from exc
+    for paragraph in page.select('.article-content p')[:3]:
+        body=paragraph.get_text(' ',strip=True)
+        for anchor in paragraph.select('a[href]'):
+            company=anchor.get_text(' ',strip=True)
+            host=link_host(anchor['href']).removeprefix('www.')
+            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9 -]{2,60}',company):continue
+            if re.sub('[ -]','',company.casefold())!=host.split('.')[0].replace('-',''):continue
+            if not re.match(re.escape(company)+r'\s+(?:предлагает|запускает|открывает|представляет)\b',body,re.I):continue
+            return dict(source,text=body,article_url=url,article_company=company,
+                        links=json.dumps([anchor['href'],url]))
+    return None
+
+
 def validate(candidate, sources, now):
     if not isinstance(candidate, dict):
         return None

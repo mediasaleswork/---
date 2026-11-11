@@ -18,7 +18,7 @@ NAME = r"[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё0-9&'’ʼʻ\-]*(?:[ \t]+[A-ZА-ЯЁ][
 LATIN = r"[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,3}"
 PREFIX = re.compile(r'(?i:\b'+ORG+r')\s+(?:[«“\"](?P<quoted>[^»”\"\n]{2,80})[»”\"]|(?P<name>'+NAME+r'))')
 UZBEK = re.compile(r'(?P<name>'+LATIN+r")\s+(?:kompaniyasi|banki|brendi|operatori|tarmog[‘’'ʻʼ]i)\b")
-HEADING = re.compile(r'^(?P<name>'+LATIN+r')\s+(?i:запуст|запуска|откры|откро|обнов|расшир|выход|представ|стал|заключ|launch|open|yangi|ishga)')
+HEADING = re.compile(r'^(?:(?i:турецкая|российская|китайская|узбекская|казахстанская|корейская)\s+)?(?P<name>'+LATIN+r')\s+(?i:запуст|запуска|откры|откро|обнов|расшир|выход|представ|стал|заключ|рассматрива|launch|open|yangi|ishga)')
 EXCLUDE = re.compile(r'^(?:IT Park|Центр технологий будущего|Национальн|Министерств|Правительств|Президент|Узбекистан|Ташкент|СМИ|ОАВ|OAV|Новый|Новая|Бизнес|Клиент|Реклама|Новости|Подробнее|Telegram|Instagram|Facebook|YouTube|Davlat|O‘zbekiston|Toshkent)\b', re.I)
 COMPETITOR = re.compile(r'(?:рекламн\w*|маркетингов\w*|PR)[\s-]*(?:агентств\w*)', re.I)
 TRAGEDY = re.compile(r'погиб|убийств|скончал|теракт|уголовн|похорон', re.I)
@@ -49,6 +49,7 @@ def advertising_brand(text,known):
     # Explicit corporate suffixes and full university names identify the subject
     # before a rating agency or a World University Rankings title in the same ad.
     subject_patterns=[
+        r'(?P<name>[“«"][^”»"\n]{2,60}[”»"]\s+(?:[a-zà-öø-ÿʻ’‘ʼ\x27]+\s+){0,7}universiteti)\b',
         r'[«“\"](?P<name>[^»”\"\n]{2,80})[»”\"]\s+(?:АК|АЖ|АО|AJ|AK|JSC|MCHJ|ООО)(?=\b|нинг\b|ning\b)',
         r'(?P<name>[A-ZÀ-ÖØ-Þ][\w’ʻʼ\x27-]*(?:\s+[a-zà-öø-ÿ][\w’ʻʼ\x27-]*){0,4}\s+universiteti)\b',
         r'(?P<name>[А-ЯЁ][а-яё]+(?:\s+[а-яё]+){0,2}\s+университет(?:\s+[а-яё]+){0,3})(?=\s+(?:получ|вош|откр|представ)|[.!?])',
@@ -72,13 +73,14 @@ def advertising_brand(text,known):
     if corporate and not re.search(r'\b(?:World University|Rankings)\b',corporate.group('name')):
         return corporate.group('name'),corporate.start('name'),corporate.end('name')
     for name,start,end in brands(text,known):
+        if name.endswith('-') or name in {'IT','SOC','SIEM'}:continue
         if name.casefold() in {v.casefold() for v in known} and name not in AD_STOP and not re.search(r'\b(?:Index|Apple Pay|World University|Rankings)\b',name):
             return name,start,end
     # Inspect the headline before names of interviewees, products and footer links.
     candidates=[]
     for match in AD_NAME.finditer(text[:240]):
         name=match.group().strip()
-        if name in AD_STOP or EXCLUDE.search(name):continue
+        if name.endswith('-') or name in {'SOC','SIEM'} or name in AD_STOP or EXCLUDE.search(name):continue
         name=re.sub(r"['’ʼʻ](?:dan|ning|ni|ga|da)\b.*$",'',name).rstrip("'’ʼʻ")
         if re.search(r'\b(?:Expo|Marathon|Forum|Olympiad|Index|Apple Pay|Medicine of the Future|World University|Rankings)\b',name,re.I):continue
         first=name.split()[0]
@@ -87,7 +89,7 @@ def advertising_brand(text,known):
             name=first
         candidates.append((name,match.start(),match.start()+len(name)))
     if candidates:return candidates[0]
-    return next(iter(brands(text,known)),None)
+    return next((brand for brand in brands(text,known) if not brand[0].endswith('-') and brand[0] not in {'IT','SOC','SIEM'}),None)
 
 
 def brands(text, known):
@@ -101,6 +103,8 @@ def brands(text, known):
             group='quoted' if 'quoted' in match.groupdict() and match.group('quoted') else 'name'
             name=match.group(group).strip()
             start,end=match.span(group)
+            if pattern is PREFIX and re.search(r'(?:глава|главы|директор|руководитель|президент)\s+$',text[:match.start()],re.I):
+                continue
             if not EXCLUDE.search(name) and 2 <= len(name) <= 80:
                 found.append((name,start,end))
     unique={}
@@ -158,8 +162,9 @@ class RuleResearcher:
             text=source['text'][:5000]
             if TRAGEDY.search(source['title']) or COMPETITOR.search(text[:500]):
                 continue
-            if is_advertisement(text):
-                brand=advertising_brand(text,self.known)
+            article_company=source.get('article_company')
+            if is_advertisement(text) or article_company:
+                brand=(article_company,0,len(article_company)) if article_company and text.startswith(article_company) else advertising_brand(text,self.known)
                 if brand:
                     company,start,end=brand
                     anchor=re.search(re.escape(text[start:end]),text)

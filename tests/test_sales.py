@@ -473,6 +473,33 @@ class SalesTests(unittest.TestCase):
             for url in ['https://[','https://example.uz/article'])
         self.assertEqual([r['url'] for r in parse_feed('<rss>'+body+'</rss>','news')],['https://example.uz/article'])
 
+    def test_deferred_articles_keep_the_issuer_and_host_institution(self):
+        examples=[
+            ('Турецкая OYAK рассматривает участие в проекте. Глава компании Мурат Ялчинташ обозначил направления для расширения сотрудничества.', 'OYAK'),
+            ('Samarqanddagi “Ipak yo‘li” turizm va madaniy meros xalqaro universiteti Xitoyning Guilin Tourism University bilan hamkorlikda qabul e’lon qildi. Reklama','“Ipak yo‘li” turizm va madaniy meros xalqaro universiteti')]
+        for text,company in examples:
+            row=dict(self.source,title=text,text=text)
+            self.assertEqual([c['company'] for c in RuleResearcher().classify([row],NOW)],[company])
+
+    def test_anonymous_sponsored_teaser_uses_verified_publisher_copy_and_keeps_post_url(self):
+        self.store.set_state('research_engine','rules-2')
+        self.store.processed([self.source['id']])
+        preview='Как наладить IT-мониторинг 24/7 и выбрать модель SOC для компании (на правах рекламы)'
+        article='https://kapital.uz/example/'
+        self.store.add_source(dict(url='https://t.me/KPTLUZ/1',origin='Telegram @KPTLUZ',published=NOW.isoformat(),
+            title=preview,text=preview,links=[article]))
+        page='<div class="article-content"><p><a href="https://onesec.uz/">ONESEC</a> предлагает компаниям три формата организации центра мониторинга.</p></div>'
+        with patch('sales_agent.research.fetch',side_effect=OSError('temporary')):
+            cycle(self.cfg,self.store,now=NOW,collect_sources=False)
+        self.assertEqual(len(self.store.pending('2026')),1)
+        with patch('sales_agent.research.fetch',return_value=page):
+            result=cycle(self.cfg,self.store,now=NOW,collect_sources=False)
+        self.assertEqual(result['status'],'ok')
+        self.assertEqual(len(self.store.publications()),1)
+        lead=self.store.leads()[0]
+        self.assertEqual((lead['company'],lead['source_url'],lead['evidence_url']),('ONESEC','https://t.me/KPTLUZ/1',article))
+        self.assertIn(article,lead['contact'])
+
     def test_workbook_identity_read_precedes_writes_and_refuses_wrong_headers(self):
         class Fake(Sheets):
             def __init__(self): self.calls=[]

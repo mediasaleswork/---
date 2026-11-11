@@ -8,7 +8,7 @@ from collections import deque
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
-from .research import Deferred, validate, enrich_contact
+from .research import Deferred, validate, enrich_contact, sponsored_article
 from .rules import RuleResearcher
 from .sheets import Sheets
 from .sources import collect, relevant
@@ -70,6 +70,19 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
             candidates = researcher.classify(batch, now)
             sources = {r["id"]:r for r in batch}
             overflow = set()
+            identified={c['source_id'] for c in candidates}
+            for item in batch:
+                if item['id'] in identified:continue
+                try:
+                    article=sponsored_article(item)
+                except Deferred:
+                    overflow.add(item['id'])
+                    continue
+                if article:
+                    for c in researcher.classify([article],now):
+                        if c['company']==article['article_company']:
+                            candidates.append(c)
+                            sources[item['id']]=article
             for candidate in candidates:
                 lead = validate(candidate, sources, now)
                 if lead:
@@ -78,6 +91,9 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
                         overflow.add(candidate["source_id"])
                     else:
                         lead=enrich_contact(lead,sources[candidate['source_id']])
+                        if article_url:=sources[candidate['source_id']].get('article_url'):
+                            lead['evidence_url']=article_url
+                            lead['contact']+=' · Источник цитаты: '+article_url
                         if store.add_lead(lead):
                             new_count += 1
                             known.add(key)

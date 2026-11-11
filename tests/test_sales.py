@@ -427,6 +427,26 @@ class SalesTests(unittest.TestCase):
             scan.assert_not_called()
             sheets.return_value.sync.assert_called_once()
 
+    def test_restart_closes_orphan_run_and_concurrent_once_cannot_touch_it(self):
+        from sales_agent.runner import run
+        path=self.cfg.data_dir/'sales.sqlite3'
+        db=Store(path)
+        with db.db:
+            db.db.execute("INSERT INTO runs(started,status) VALUES(?,'running')",(NOW.isoformat(),))
+        db.close()
+        with patch('sales_agent.runner.Sheets') as sheets:
+            sheets.return_value.read.return_value=[[True]]
+            def another_run(_):
+                with self.assertRaisesRegex(RuntimeError,'уже выполняется'):
+                    run(self.cfg,once=True)
+            sheets.return_value.sync.side_effect=another_run
+            run(self.cfg,once=True)
+        db=Store(path)
+        try:
+            self.assertEqual(tuple(db.db.execute('SELECT status,finished FROM runs').fetchone()),('interrupted',None))
+        finally:
+            db.close()
+
     def test_malformed_contact_link_does_not_block_other_sources(self):
         import json
         from sales_agent.research import enrich_contact

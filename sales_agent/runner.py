@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 from collections import deque
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 from .research import Deferred, validate, enrich_contact
@@ -103,8 +105,25 @@ def due(store, cfg, now):
 
 
 def run(cfg, once=False):
+    # SQLite releases this process lock on exit/crash on both Linux and Windows.
+    # Keep it off the sales database so normal reads and durable commits continue.
+    with closing(sqlite3.connect(cfg.data_dir / 'sales-runner.lock',timeout=0)) as lock:
+        try:
+            lock.execute('BEGIN IMMEDIATE')
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED):
+                raise RuntimeError("Mediasales уже выполняется на этом томе") from exc
+            raise
+        run_locked(cfg,once)
+
+
+def run_locked(cfg, once):
     store = Store(cfg.data_dir / "sales.sqlite3")
     try:
+        with store.db:
+            store.db.execute("""UPDATE runs SET status='interrupted',detail=?
+                WHERE status='running' AND finished IS NULL""",
+                ('Процесс прерван до записи итога. Время окончания неизвестно. Очередь сохранена.',))
         # Google access and workbook identity are checked before monitoring.
         sheet = Sheets(cfg)
         verified = False

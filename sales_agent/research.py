@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import urlsplit
-from .sources import fetch
+from .sources import fetch, link_host
 from bs4 import BeautifulSoup
 
 SERVICES = {"PR", "Telegram и СМИ", "Digital", "SMM и контент", "Мероприятия", "Комплексное продвижение"}
@@ -23,23 +22,13 @@ class Deferred(Exception):
     pass
 
 
-def link_host(url):
-    try:
-        parts = urlsplit(url)
-        if parts.scheme == 'https' and not parts.username and not parts.password:
-            return (parts.hostname or '').lower()
-    except (TypeError, ValueError):
-        pass
-    return ''
-
-
 def validate(candidate, sources, now):
     if not isinstance(candidate, dict):
         return None
     sid = candidate.get("source_id")
     source = sources.get(sid)
     required = ("company", "evidence_quote", "sector", "event_kind", "service", "hypothesis", "priority", "rationale", "confidence")
-    if not source or any(not isinstance(candidate.get(k), str) or not candidate[k].strip() for k in required):
+    if not source or not link_host(source['url']) or any(not isinstance(candidate.get(k), str) or not candidate[k].strip() for k in required):
         return None
     company, quote = candidate["company"].strip(), candidate["evidence_quote"].strip()
     norm = lambda s: re.sub(r"\s+", " ", s).strip().casefold()

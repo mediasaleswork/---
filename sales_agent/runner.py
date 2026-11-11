@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from .research import Deferred, validate, enrich_contact
@@ -12,6 +13,32 @@ from .sources import collect, relevant
 from .store import Store, normalized, stamp
 
 log = logging.getLogger(__name__)
+
+
+def pending_batches(store,since,batch_size,oldest_first):
+    cursor=None
+    while page:=store.pending(since,cursor,oldest_first):
+        cursor=(page[-1]['published'],page[-1]['id'])
+        grouped={}
+        ignored=[]
+        for item in page:
+            if relevant(item):
+                grouped.setdefault(item['origin'],deque()).append(item)
+            else:
+                ignored.append(item['id'])
+        store.processed(ignored)
+        origins=deque(grouped.values())
+        batch=[]
+        while origins:
+            source=origins.popleft()
+            batch.append(source.popleft())
+            if source:
+                origins.append(source)
+            if len(batch)==batch_size:
+                yield batch
+                batch=[]
+        if batch:
+            yield batch
 
 
 def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
@@ -31,25 +58,13 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
         if collect_sources:
             count = collect(cfg, store, now)
             available=bool(store.db.execute("SELECT 1 FROM source_health WHERE status='ok' AND checked>=?",(started,)).fetchone())
-        pending=store.pending((now - timedelta(days=cfg.lookback_days)).isoformat())
-        queue = [s for s in pending if relevant(s)]
-        accepted_ids={s['id'] for s in queue}
-        # Drain irrelevant stories too, so a busy news channel cannot permanently hide older candidates.
-        store.processed([s['id'] for s in pending if s['id'] not in accepted_ids])
-        # Round-robin origins gives the configured sources a fair share of new leads.
-        grouped = {}
-        for item in queue:
-            grouped.setdefault(item["origin"], []).append(item)
-        queue = []
-        while any(grouped.values()):
-            for items in grouped.values():
-                if items:
-                    queue.append(items.pop(0))
+        since=(now-timedelta(days=cfg.lookback_days)).isoformat()
         companies=[lead['company'] for lead in store.leads()]
         known={normalized(company) for company in companies}
         researcher = researcher or RuleResearcher(companies)
-        for offset in range(0, len(queue), cfg.batch_size):
-            batch = queue[offset:offset + cfg.batch_size]
+        had_candidates=False
+        for batch in pending_batches(store,since,cfg.batch_size,oldest_first=run%2==0):
+            had_candidates=True
             candidates = researcher.classify(batch, now)
             sources = {r["id"]:r for r in batch}
             overflow = set()
@@ -67,7 +82,7 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
             store.processed([r["id"] for r in batch if r["id"] not in overflow])
         new_publications=store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]-publications_before
         detail = "Новых компаний: "+str(new_count)+", публикаций: "+str(new_publications)+". История размещений — на листе «Публикации». Перед обращением нужна проверка CRM"
-        if not queue:
+        if not had_candidates:
             detail += "; в очереди нет свежих коммерческих сигналов"
         if not available:
             status="error"

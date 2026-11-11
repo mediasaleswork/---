@@ -440,6 +440,19 @@ class SalesTests(unittest.TestCase):
             '<link rel="self" href="https://example.uz/feed"/></entry></feed>','test')
         self.assertEqual(rows[0]['url'],'https://example.uz/article')
 
+    def test_newer_page_of_news_does_not_hide_the_older_lead(self):
+        for i in range(305):
+            self.store.add_source(dict(url=f'https://example.uz/{i}',title='Погода',text='Погода',
+                published=(NOW+timedelta(seconds=1)).isoformat(),origin='news'))
+        result=cycle(self.cfg,self.store,now=NOW+timedelta(minutes=1),collect_sources=False)
+        self.assertEqual(result['new_leads'],1)
+        self.assertFalse(self.store.pending('2026'))
+
+    def test_invalid_rss_article_url_does_not_block_the_valid_item(self):
+        body=''.join(f'<item><link>{url}</link><title>Новость</title><pubDate>{NOW.isoformat()}</pubDate></item>'
+            for url in ['https://[','https://example.uz/article'])
+        self.assertEqual([r['url'] for r in parse_feed('<rss>'+body+'</rss>','news')],['https://example.uz/article'])
+
     def test_workbook_identity_read_precedes_writes_and_refuses_wrong_headers(self):
         class Fake(Sheets):
             def __init__(self): self.calls=[]

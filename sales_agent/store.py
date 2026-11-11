@@ -31,6 +31,7 @@ class Store:
           CREATE TABLE IF NOT EXISTS sources(
             id TEXT PRIMARY KEY, url TEXT UNIQUE, title TEXT, text TEXT, published TEXT,
             checked TEXT, origin TEXT, links TEXT, processed INTEGER DEFAULT 0);
+          CREATE INDEX IF NOT EXISTS source_queue ON sources(processed,published,id);
           CREATE TABLE IF NOT EXISTS leads(
             id TEXT PRIMARY KEY, company_key TEXT UNIQUE, payload TEXT, created TEXT);
           CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value TEXT);
@@ -72,9 +73,14 @@ class Store:
           (sid, item["url"], item["title"], item["text"], item["published"], stamp(), item["origin"], json.dumps(item.get("links", []))))
         self.db.commit()
 
-    def pending(self, since):
-        return [dict(r) for r in self.db.execute(
-            "SELECT * FROM sources WHERE processed=0 AND published>=? ORDER BY published DESC LIMIT 300", (since,))]
+    def pending(self, since, cursor=None, oldest_first=False):
+        order,comparison=('ASC','>') if oldest_first else ('DESC','<')
+        sql="SELECT * FROM sources WHERE processed=0 AND published>=?"
+        params=[since]
+        if cursor is not None:
+            sql+=f" AND (published,id) {comparison} (?,?)"
+            params.extend(cursor)
+        return [dict(r) for r in self.db.execute(sql+f" ORDER BY published {order},id {order} LIMIT 300",params)]
 
     def processed(self, ids):
         self.db.executemany("UPDATE sources SET processed=1 WHERE id=?", [(s,) for s in ids])

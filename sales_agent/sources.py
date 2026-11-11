@@ -46,6 +46,16 @@ def clean(value):
     return re.sub(r"\s+", " ", BeautifulSoup(value or "", "html.parser").get_text(" ", strip=True)).strip()
 
 
+def link_host(url):
+    try:
+        parts = urlsplit(url)
+        if parts.scheme == 'https' and not parts.username and not parts.password:
+            return (parts.hostname or '').lower()
+    except (TypeError, ValueError):
+        pass
+    return ''
+
+
 def parse_date(value):
     try:
         date = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
@@ -65,7 +75,7 @@ def parse_feed(raw, origin):
             return next((fields[name].text for name in names if name in fields and fields[name].text), "")
         link = value("link").strip() or next((child.get("href","") for child in node
             if child.tag.split("}")[-1]=="link" and child.get("rel","alternate")=="alternate"), "")
-        if not link.startswith("https://"):
+        if not link_host(link):
             continue
         try:
             date = parse_date(value("pubDate", "published", "updated", "date"))

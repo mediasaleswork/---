@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote,urlsplit
+from .sources import link_host
 
 from google.auth import load_credentials_from_file
 from google.auth.transport.requests import AuthorizedSession
@@ -196,7 +197,8 @@ class Sheets:
             additions=[]
             for v in versions:
                 if (v['id'],v['source_url']) in published_keys:continue
-                url=urlsplit(v['source_url']);platform='@'+url.path.strip('/').split('/')[0] if url.hostname=='t.me' else url.hostname
+                host=link_host(v['source_url'])
+                platform='@'+urlsplit(v['source_url']).path.strip('/').split('/')[0] if host=='t.me' else host
                 additions.append([v['company'],datevalue(v['published'],self.timezone),platform,v['evidence_quote'],v['source_url'],v['id']])
             end=len(posted)+len(additions)
             extend_grid(structure,publication_sheet,end)

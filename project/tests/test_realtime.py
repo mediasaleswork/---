@@ -3,7 +3,7 @@ from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from telethon import errors, types
 from telethon.tl.functions.channels import GetFullChannelRequest

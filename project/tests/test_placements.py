@@ -6,7 +6,6 @@ import unittest
 from telethon import types
 
 from partner_monitor.engine import Monitor
-from partner_monitor.parsing import parse_partner_references
 import test_engine as fixtures
 from test_engine import FakeClient, FakeCapture, NOW, message, channel, attachment_message, docx_bytes
 

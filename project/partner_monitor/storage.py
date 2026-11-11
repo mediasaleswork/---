@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -130,8 +130,20 @@ class Store(AbstractContextManager):
         return [dict(r) for r in self.db.execute(sql, params)]
 
     def execute(self, sql: str, params=()):
+        if self.db.in_transaction:
+            return self.db.execute(sql, params)
         with self.db:
             return self.db.execute(sql, params)
+
+    @contextmanager
+    def transaction(self):
+        """Group synchronous Store writes, including calls through intake helpers."""
+        if self.db.in_transaction:
+            yield
+        else:
+            with self.db:
+                self.db.execute("BEGIN")
+                yield
 
     def state(self, key: str, default: str = "0") -> str:
         row = self.db.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()

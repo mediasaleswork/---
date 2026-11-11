@@ -92,7 +92,7 @@ def unavailable(worker,job,archived=False):
     retry=(datetime.now(timezone.utc)+timedelta(minutes=delay)).isoformat()
     worker.store.execute("""UPDATE campaign_checks SET status=?,reason=?,
         availability_attempts=availability_attempts+1,next_try_at=?,checked_at=?
-        WHERE id=? AND status IN ('pending','error','review','unavailable','archived_no_match')""",
+        WHERE id=? AND status IN ('pending','error','review','unavailable','archived_no_match','local_checked','offline_review')""",
         ('archived_no_match' if archived else 'unavailable',job['reason'] if archived else 'Telegram не вернул публикацию; удаление не подтверждено. Повторная проверка запланирована.',retry,utcnow(),job['id']))
     worker.monitor.changed.set()
 

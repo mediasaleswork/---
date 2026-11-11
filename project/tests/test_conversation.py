@@ -1,12 +1,11 @@
 """Offline scenarios resembling a working advertising chat, with no real data."""
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import json
-from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from telethon import types, utils
+from telethon import types
 
 from partner_monitor.engine import Monitor
 from partner_monitor.intake import ConversationIntake
@@ -17,7 +16,7 @@ from partner_monitor.realtime import Realtime
 from partner_monitor.reports import _google_tables
 from partner_monitor.storage import Store
 import test_engine as fixtures
-from test_engine import NOW, FakeClient, FakeCapture, message, channel
+from test_engine import NOW, FakeClient, FakeCapture, message
 
 
 def image_message(mid, text="", photo=900, peer=100):

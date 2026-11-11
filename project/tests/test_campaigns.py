@@ -1,5 +1,4 @@
 """Offline integration checks; judge responses are mocked, not live AI accuracy."""
-import asyncio
 from dataclasses import replace
 from datetime import timedelta
 import io
@@ -13,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from PIL import Image
 
 from partner_monitor.campaigns import (CampaignAPIError, CampaignWorker, LimitedBuffer,
-    OpenAICampaignJudge, GeminiCampaignJudge, candidate_signature, enqueue, image_input, source_signature, validate_decision)
+    OpenAICampaignJudge, GeminiCampaignJudge, enqueue, image_input, validate_decision)
 from partner_monitor.config import load_config
 from partner_monitor.engine import Monitor
 from partner_monitor.storage import Store

@@ -56,6 +56,23 @@ class QueueTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.rows("SELECT * FROM campaign_checks WHERE status='local_checked'")),2)
         self.assertEqual(self.store.state('campaign_mode'),'local')
 
+    async def test_local_jobs_missing_at_ai_recheck_back_off_and_keep_history(self):
+        self.batch(candidates=[message(7,'Текст'),message(8,'Текст другой')])
+        await self.queue_only()
+        self.store.set_state('campaign_local_rules_v2','1')
+        for job,status in zip(self.store.rows('SELECT * FROM campaign_checks ORDER BY id'),('local_checked','offline_review')):
+            self.monitor.campaign_worker.finish(job,status,'Проверено локально')
+        self.client.histories[200]=[]
+        await self.monitor.campaign_worker.process()
+        rows=self.store.rows('SELECT status,availability_attempts,next_try_at,checked_at FROM campaign_checks')
+        self.assertEqual(len(rows),2)
+        for row in rows:
+            self.assertEqual(row['status'],'unavailable')
+            self.assertEqual(row['availability_attempts'],1)
+            self.assertGreater(row['next_try_at'],row['checked_at'])
+        self.assertFalse(self.judge.calls)
+        self.assertEqual(len(self.store.rows('SELECT * FROM campaign_reviews')),2)
+
     async def test_unavailable_post_is_retried_and_can_be_recovered(self):
         self.batch(candidates=[message(7,'Материал с изменённым текстом')])
         await self.queue_only();saved=self.client.histories[200];self.client.histories[200]=[]

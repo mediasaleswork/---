@@ -127,7 +127,8 @@ class ConversationIntake:
         if self.store.rows("SELECT message_id FROM source_messages WHERE source_chat_id=? AND message_id=?", (str(chat), message.id)):
             return
         if self.config.forwarded_intake:
-            self.consume_forwarded(chat, message, content)
+            with self.store.transaction():
+                self.consume_forwarded(chat, message, content)
             return
         text = content.text.strip()
         normalized = _normalize(text)
@@ -271,6 +272,10 @@ class ConversationIntake:
 
     def refresh_forwarded(self, chat, message, content):
         """Reconcile an edit to an already ingested message; retain its old data."""
+        with self.store.transaction():
+            self._refresh_forwarded(chat, message, content)
+
+    def _refresh_forwarded(self, chat, message, content):
         previous=self.store.rows('SELECT * FROM source_messages WHERE source_chat_id=? AND message_id=?',(str(chat),message.id))
         if not previous:
             return
@@ -305,10 +310,14 @@ class ConversationIntake:
         cutoff = (received - timedelta(days=self.config.default_window_days)).isoformat()
         for draft in self.store.rows("SELECT * FROM intake_drafts WHERE status='approved' AND created_at>=?", (cutoff,)):
             previous = json.loads(draft["target_refs"])
-            new = [name for name in self.config.allowed_channels if name not in previous]
+            placed = {p['username'] or f"c:{p['private_channel_id']}" for p in self.store.rows(
+                """SELECT p.username,p.private_channel_id FROM placements x JOIN partners p
+                   ON p.id=x.partner_id WHERE x.draft_id=?""",(draft['id'],))}
+            new = [name for name in self.config.allowed_channels if name not in placed]
             if new:
-                self._sync(draft, received, new, approved=True)
-                self.store.execute("UPDATE intake_drafts SET target_refs=? WHERE id=?", (packed(list(dict.fromkeys(previous + new))), draft["id"]))
+                with self.store.transaction():
+                    self._sync(draft, received, new, approved=True)
+                    self.store.execute("UPDATE intake_drafts SET target_refs=? WHERE id=?", (packed(list(dict.fromkeys(previous + new))), draft["id"]))
 
     def reconcile_publication_windows(self):
         if not self.config.forwarded_intake:

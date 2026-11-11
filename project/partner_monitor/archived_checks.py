@@ -86,18 +86,18 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
         try:validate_decision(decision,[p['id'] for p in placements])
         except ValueError:decision=None
     if decision is None and not ai_ready:return 'waiting'
-    content=[]
-    for p in placements:
-        content.append({'type':'input_text','text':'REFERENCE '+packed({'campaign_id':p['id'],
-            'client':p['client_name'],'advertisement':p['name'],'text':p['source_text'][:16000]})})
-        content.extend(await worker.reference_images(p))
-    content.append({'type':'input_text','text':'PUBLICATION '+packed({'text':value['text'][:16000],
-        'urls':value.get('urls',[]),'historical_caption':True,'publication_visuals_available':False,
-        'published_at':value['published_at'],'archive_checked_at':value.get('archive_checked_at')})})
-    if sum(len(part.get('image_url','')) for part in content)>12*1024*1024:raise CampaignAPIError('image_too_large')
     store=worker.store
     if decision is None:
         from .campaign_runtime import reserve_request,finish_request
+        content=[]
+        for p in placements:
+            content.append({'type':'input_text','text':'REFERENCE '+packed({'campaign_id':p['id'],
+                'client':p['client_name'],'advertisement':p['name'],'text':p['source_text'][:16000]})})
+            content.extend(await worker.reference_images(p))
+        content.append({'type':'input_text','text':'PUBLICATION '+packed({'text':value['text'][:16000],
+            'urls':value.get('urls',[]),'historical_caption':True,'publication_visuals_available':False,
+            'published_at':value['published_at'],'archive_checked_at':value.get('archive_checked_at')})})
+        if sum(len(part.get('image_url','')) for part in content)>12*1024*1024:raise CampaignAPIError('image_too_large')
         request_id=reserve_request(worker,[job])
         try:
             decision=await asyncio.to_thread(worker.judge.compare_archived,content)

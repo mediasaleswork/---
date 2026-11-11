@@ -10,7 +10,6 @@ from partner_monitor.intake import ConversationIntake
 from partner_monitor.message_content import message_content
 from partner_monitor.engine import Monitor
 from partner_monitor.campaigns import CampaignWorker
-from partner_monitor.config import load_config
 from test_engine import FakeClient, FakeCapture, NOW, message
 from test_conversation import image_message
 import test_conversation as conversation

@@ -1,16 +1,30 @@
 """Bounded replay of observed history, independent from the new-post cursor."""
 from datetime import datetime, timedelta, timezone
 import json
+from uuid import uuid4
 
 from telethon import types
 from .campaigns import model_identity, source_signature
+
+
+def pending_source_edits(store):
+    pending = json.loads(store.state('source_edited_ids', '{}'))
+    if isinstance(pending, list):  # Already queued by the previous release.
+        return {str(mid): {'version': 'legacy', 'retry_at': ''} for mid in pending}
+    return pending
+
+
+def queue_source_edit(store, mid):
+    pending = pending_source_edits(store)
+    pending[str(mid)] = {'version': uuid4().hex, 'retry_at': ''}
+    store.set_state('source_edited_ids', json.dumps(pending))
 
 
 async def refresh_source_materials(monitor,entity):
     if not monitor.config.forwarded_intake or not monitor.scope_ready:
         return
     store=monitor.store;now=datetime.now(timezone.utc)
-    pending=json.loads(store.state('source_edited_ids','[]'))
+    pending=pending_source_edits(store)
     due=store.state('source_material_recheck_at','')<=now.isoformat()
     if not pending and not due:
         return
@@ -22,8 +36,10 @@ async def refresh_source_materials(monitor,entity):
     cutoff=(now-timedelta(days=monitor.config.default_window_days)).isoformat()
     rows=store.rows('SELECT message_id FROM source_messages WHERE source_chat_id=? AND message_id>? AND message_id<=? AND received_at>=? ORDER BY message_id LIMIT 100',
         (chat,cycle.get('cursor',0),cycle.get('upper',0),cutoff)) if due else []
-    pending_known=[mid for mid in pending if store.rows('SELECT message_id FROM source_messages WHERE source_chat_id=? AND message_id=?',(chat,mid))]
-    ids=list(dict.fromkeys(pending_known+[r['message_id'] for r in rows]))[:100]
+    ready_edits=[int(mid) for mid, item in pending.items() if item['retry_at']<=now.isoformat()]
+    # Reserve room for both history and live edits, even when some IDs are unavailable.
+    priority=ready_edits[:50 if rows else 100]
+    ids=list(dict.fromkeys(priority+[r['message_id'] for r in rows]))[:100]
     if ids:
         from .intake import ConversationIntake
         from .message_content import combined_content
@@ -38,12 +54,22 @@ async def refresh_source_materials(monitor,entity):
             if anchor.id in seen:continue
             seen.add(anchor.id)
             intake.refresh_forwarded(chat,anchor,combined_content(members))
-        store.set_state('source_edited_ids',json.dumps([mid for mid in pending_known if mid not in received]))
-        processed=[r['message_id'] for r in rows if r['message_id'] in ids]
-        if processed:
-            cycle['cursor']=max(processed)
+        current=pending_source_edits(store)
+        for mid in ids:
+            key=str(mid)
+            if key not in pending or current.get(key)!=pending[key]:
+                continue  # An edit to this ID may have arrived during the network read.
+            if mid in received:
+                del current[key]
+            else:
+                current[key]['retry_at']=(now+timedelta(minutes=15)).isoformat()
+        store.set_state('source_edited_ids',json.dumps(current))
+        for row in rows:
+            if row['message_id'] not in ids:
+                break
+            cycle['cursor']=row['message_id']
     if due:
-        if len(rows)<100 or cycle.get('cursor',0)>=cycle.get('upper',0):
+        if not rows or (len(rows)<100 and cycle['cursor']>=rows[-1]['message_id']) or cycle['cursor']>=cycle['upper']:
             store.set_state('source_material_recheck_cycle','{}')
             store.set_state('source_material_recheck_at',(now+timedelta(minutes=15)).isoformat())
         else:

@@ -15,7 +15,6 @@ from telethon.tl.functions.messages import CheckChatInviteRequest
 from partner_monitor.capture import CaptureResult
 from partner_monitor.config import Config
 from partner_monitor.engine import Monitor, due_milestones
-from partner_monitor.parsing import PartnerReference
 from partner_monitor.storage import Store
 
 

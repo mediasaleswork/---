@@ -138,11 +138,10 @@ class Realtime:
     async def edited(self, event):
         message=event.message
         if self.monitor.config.forwarded_intake and utils.get_peer_id(message.peer_id)==self.monitor.source_peer_id:
-            import json
+            from .reconciliation import queue_source_edit
             if getattr(message,'grouped_id',None):
                 message=(await self.monitor.album(message.peer_id,message))[0]
-            pending=json.loads(self.monitor.store.state('source_edited_ids','[]'))
-            self.monitor.store.set_state('source_edited_ids',json.dumps(list(dict.fromkeys(pending+[message.id]))))
+            queue_source_edit(self.monitor.store,message.id)
             self.monitor.wake.set()
             return
         if getattr(message,'grouped_id',None):

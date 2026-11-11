@@ -235,9 +235,8 @@ class MeasurementRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.state('source_intake_error'),'OSError')
 
     async def test_twenty_hour_schedule_replaces_current_picture_and_keeps_initial_history(self):
-        from pathlib import Path
         from PIL import Image
-        from partner_monitor.measurements import ensure_jobs,ready_jobs
+        from partner_monitor.measurements import ready_jobs
         from partner_monitor.report_view import current_picture
         partner=await self.setup_post()
         published=engine.NOW-timedelta(hours=21)
@@ -288,6 +287,68 @@ class SourceEditTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp=forwarded.ForwardedIntakeTests.asyncSetUp
     asyncTearDown=forwarded.ForwardedIntakeTests.asyncTearDown
     consume=forwarded.ForwardedIntakeTests.consume
+
+    async def test_interrupted_forward_rolls_back_and_retry_creates_every_placement(self):
+        source=engine.message(1,'Материал кампании',peer=100)
+        source.fwd_from=SimpleNamespace(from_id=None)
+        original=self.store.execute
+        def interrupt(sql,params=()):
+            result=original(sql,params)
+            if 'INSERT INTO placements(' in sql:raise OSError('interrupted intake')
+            return result
+        from unittest.mock import patch
+        with patch.object(self.store,'execute',side_effect=interrupt):
+            with self.assertRaises(OSError):self.consume(source)
+        self.assertFalse(self.store.rows('SELECT id FROM intake_drafts'))
+        self.assertFalse(self.store.rows('SELECT id FROM placements'))
+        self.consume(source)
+        self.assertEqual(len(self.store.rows('SELECT id FROM placements')),len(self.config.allowed_channels))
+
+    async def test_folder_refresh_repairs_preexisting_missing_placement(self):
+        source=engine.message(1,'Материал кампании',peer=100)
+        source.fwd_from=SimpleNamespace(from_id=None)
+        self.consume(source)
+        original=self.store.rows('SELECT partner_id FROM placements ORDER BY partner_id')
+        self.store.execute('DELETE FROM placements WHERE partner_id=?',(original[0]['partner_id'],))
+        self.intake.attach_folder_channels(source.date)
+        self.assertEqual(self.store.rows('SELECT partner_id FROM placements ORDER BY partner_id'),original)
+
+    async def test_edit_arriving_during_fetch_survives_even_for_same_message(self):
+        from partner_monitor.reconciliation import refresh_source_materials,queue_source_edit,pending_source_edits
+        source=engine.message(1,'Материал кампании',peer=100)
+        source.fwd_from=SimpleNamespace(from_id=None)
+        self.consume(source)
+        client=engine.FakeClient([source])
+        monitor=Monitor(self.config,self.store,client,engine.FakeCapture())
+        monitor.source_peer_id=-1000000000100
+        self.store.set_state('source_edited_ids','[1]')
+        original=client.get_messages
+        async def interleaved(entity,ids):
+            queue_source_edit(self.store,1)
+            queue_source_edit(self.store,2)
+            return await original(entity,ids)
+        client.get_messages=interleaved
+        await refresh_source_materials(monitor,client.group)
+        self.assertEqual(set(pending_source_edits(self.store)),{'1','2'})
+        client.get_messages=original
+        await refresh_source_materials(monitor,client.group)
+        self.assertEqual(set(pending_source_edits(self.store)),{'2'})
+        self.assertTrue(pending_source_edits(self.store)['2']['retry_at'])
+
+    async def test_pending_edits_cannot_skip_last_partial_history_page(self):
+        from partner_monitor.reconciliation import refresh_source_materials
+        messages=[engine.message(mid,'Новость '+str(mid),peer=100) for mid in range(1,81)]
+        for item in messages:self.consume(item)
+        self.store.set_state('source_edited_ids',json.dumps(list(range(200,280))))
+        client=engine.FakeClient(messages)
+        monitor=Monitor(self.config,self.store,client,engine.FakeCapture())
+        monitor.source_peer_id=-1000000000100
+        await refresh_source_materials(monitor,client.group)
+        self.assertEqual(json.loads(self.store.state('source_material_recheck_cycle'))['cursor'],50)
+        await refresh_source_materials(monitor,client.group)
+        self.assertEqual(self.store.state('source_material_recheck_cycle'),'{}')
+        fetched={mid for kind,_,ids in client.calls if kind=='messages' for mid in ids}
+        self.assertTrue(set(range(1,81))<=fetched)
 
     async def test_text_only_forwarded_reference_and_edits_keep_original_window_and_revision(self):
         from partner_monitor.message_content import message_content

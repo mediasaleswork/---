@@ -73,7 +73,8 @@ class ArchivedTests(IsolatedAsyncioTestCase):
             self.assertTrue(self.store.rows('SELECT provisional_decision FROM campaign_checks')[0]['provisional_decision'])
             fail=False
             self.store.set_state('campaign_quota_retry_at',(NOW+timedelta(days=1)).isoformat())
-            await self.monitor.campaign_worker.process()
+            with patch.object(self.monitor.campaign_worker,'reference_images',side_effect=OSError('reference no longer available')):
+                await self.monitor.campaign_worker.process()
             self.assertEqual(compare.call_count,1)
         self.assertEqual(self.store.rows('SELECT status FROM campaign_checks')[0]['status'],'archived_no_match')
 

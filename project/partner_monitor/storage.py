@@ -235,7 +235,7 @@ class Store(AbstractContextManager):
             # Intake diagnostics travel through the existing report API without
             # changing its three-list signature. Only the first partner owns it.
             partner["intake"] = []
-            partner["campaign_checks"] = self.rows("SELECT message_ids,status,reason,checked_at,next_try_at,availability_attempts,candidate_snapshot FROM campaign_checks WHERE partner_id=? AND status IN ('unavailable','review','archived_no_match','offline_review') ORDER BY created_at DESC",(partner['id'],))
+            partner["campaign_checks"] = self.rows("SELECT id,message_ids,status,reason,checked_at,next_try_at,availability_attempts,candidate_snapshot FROM campaign_checks WHERE partner_id=? AND status IN ('unavailable','review','archived_no_match','offline_review') ORDER BY created_at DESC,id",(partner['id'],))
             partner["campaign_queue"] = self.rows("SELECT status,COUNT(*) AS n FROM campaign_checks WHERE partner_id=? AND status IN ('pending','error','unavailable','review','archived_no_match','local_checked','offline_review') GROUP BY status",(partner['id'],))
             partner["placements"] = self.rows("SELECT * FROM placements WHERE partner_id=? ORDER BY id", (partner["id"],))
             for placement in partner["placements"]:

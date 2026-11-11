@@ -1,6 +1,7 @@
 """Server-side Excel presentation: totals and embedded post evidence in one file."""
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 import json
 import math
@@ -284,18 +285,25 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         jump(detail.cell(row, 9), "Отчёт", f"A{anchors[post['id']]}", "Открыть снимок")
     unavailable_headers = ["Инструмент", "Площадки", "Пост", "Состояние", "Опубликован", "Последняя проверка", "Недоступен с", "Последние просмотры", "Снимок", "Причина"]
     unavailable_rows = [unavailable_headers] + [[p["client"].replace("Клиент не указан", "Инструмент не указан"), p["channel"], p["url"], p["state"], None, None, None, p["views"], "Открыть снимок", p["error"]] for p in view["unavailable"]]
-    waiting=[];seen_waiting=set()
+    waiting=[]
     for partner in partners:
+        checks={}
         for job in partner.get('campaign_checks',[]):
-            key=(partner['id'],job['message_ids'])
-            if key in seen_waiting:continue
-            seen_waiting.add(key)
+            key=(job['message_ids'],job.get('id') or job.get('status','unavailable'))
+            checks.setdefault(key,job)
+        totals=Counter(job['message_ids'] for job in checks.values())
+        seen=Counter()
+        for job in checks.values():
+            ids=job['message_ids']
+            seen[ids]+=1
             mid=min(json.loads(job['message_ids']))
             url=f"https://t.me/{partner['username']}/{mid}" if partner.get('username') else f"https://t.me/c/{partner.get('channel_id')}/{mid}"
             info=json.loads(job.get('candidate_snapshot') or '{}')
             needs_review=job.get('status') in {'review','offline_review'}
             is_archived=job.get('status')=='archived_no_match'
             reason=job['reason']+(' Требуется проверка совпадения.' if needs_review else ' Повтор: '+shown_time(local(job['next_try_at'],tz))+'.')
+            if totals[ids]>1:
+                reason=f'Проверка {seen[ids]} из {totals[ids]} по этому адресу. '+reason
             waiting.append((job,info))
             unavailable_rows.append(['Не подтверждено',partner.get('title') or partner.get('username'),url,
                 'Архивный текст — нет совпадения' if is_archived else 'Не засчитано — нужна сверка' if needs_review else 'Не засчитано — проверка доступности',None,None,None,info.get('views'),'',reason])

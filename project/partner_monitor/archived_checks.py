@@ -12,15 +12,15 @@ from .message_content import combined_content
 from .storage import utcnow
 
 
-def caption_payload(job):
+def caption_payload(job, min_length=40):
     try:value=json.loads(job.get('candidate_snapshot') or '{}')
     except (ValueError,TypeError):return None
-    if not isinstance(value,dict) or not isinstance(value.get('text'),str) or len(value['text'].strip())<40:return None
+    if not isinstance(value,dict) or not isinstance(value.get('text'),str) or len(value['text'].strip())<min_length:return None
     return value
 
 
-def saved_caption(job,partner):
-    value=caption_payload(job)
+def saved_caption(job,partner,min_length=40):
+    value=caption_payload(job,min_length)
     if not value:return None
     mid=min(json.loads(job['message_ids']))
     expected=f"https://t.me/{partner['username']}/{mid}" if partner.get('username') else f"https://t.me/c/{partner.get('channel_id')}/{mid}"
@@ -30,6 +30,21 @@ def saved_caption(job,partner):
     if published.tzinfo is None or published>datetime.now(timezone.utc):return None
     if not isinstance(value.get('urls',[]),list):return None
     return value
+
+
+def local_archive_review(worker,job,partner,placements):
+    from .candidate_archive import files_for_job
+    from .campaign_local import conflicting_numbers,text_copy
+    files=files_for_job(worker.store,job)
+    value=saved_caption(job,partner,0) if files else None
+    if not value:return False
+    keys={f['key'] for f in files if f['saved'] and not f['key'].startswith('post:')}
+    matched=[p['id'] for p in placements if not conflicting_numbers(value['text'],p) and
+        (text_copy(value['text'],p) or keys.intersection(json.loads(p.get('media_keys') or '[]')))]
+    if not matched:return False
+    worker.finish(job,'review','Оригинал недоступен. В сохранённой копии совпадает текст или файл задания; требуется подтверждение.',
+        {'evidence_type':'observed_archive','mode':'local','matching_campaign_ids':matched})
+    return True
 
 
 async def recover_forwarded_captions(worker):
@@ -72,10 +87,15 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
     from .campaign_queue import current,unavailable
     refreshed=worker.store.rows('SELECT candidate_snapshot,archive_signature,provisional_decision FROM campaign_checks WHERE id=?',(job['id'],))
     if refreshed:job={**job,**refreshed[0]}
-    value=saved_caption(job,partner)
+    from .candidate_archive import files_for_job,image_parts
+    files=files_for_job(worker.store,job)
+    archive=getattr(worker.store,'candidate_archive',None)
+    value=saved_caption(job,partner,0 if files else 40)
     if not value or not callable(getattr(type(worker.judge),'compare_archived',None)):return None
     if not any(datetime.fromisoformat(p['starts_at'])<=datetime.fromisoformat(value['published_at'])<datetime.fromisoformat(p['ends_at']) for p in placements):return None
-    signature=digest([job['source_signature'],value])
+    visuals=await asyncio.to_thread(image_parts,archive,files) if archive and files else []
+    if not value['text'].strip() and not visuals:return None
+    signature=digest([job['source_signature'],value]+([visuals] if visuals else []))
     if job.get('archive_signature')==signature and job['status']=='archived_no_match':
         unavailable(worker,job,archived=True)
         return 'cached'
@@ -95,8 +115,9 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
                 'client':p['client_name'],'advertisement':p['name'],'text':p['source_text'][:16000]})})
             content.extend(await worker.reference_images(p))
         content.append({'type':'input_text','text':'PUBLICATION '+packed({'text':value['text'][:16000],
-            'urls':value.get('urls',[]),'historical_caption':True,'publication_visuals_available':False,
+            'urls':value.get('urls',[]),'historical_caption':True,'publication_visuals_available':bool(visuals),
             'published_at':value['published_at'],'archive_checked_at':value.get('archive_checked_at')})})
+        content.extend(visuals)
         if sum(len(part.get('image_url','')) for part in content)>12*1024*1024:raise CampaignAPIError('image_too_large')
         request_id=reserve_request(worker,[job])
         try:
@@ -130,9 +151,12 @@ async def check_saved_caption(worker,job,partner,placements,entity,ai_ready):
         ident=digest([partner['id'],sorted(m.id for m in returned),source_signature(latest,model_identity(worker.config)),candidate_signature(returned)])
         store.execute("UPDATE campaign_checks SET status='pending',next_try_at=? WHERE id=? AND status='obsolete'",(utcnow(),ident))
         return 'requested'
-    status='archived_no_match' if result=='no_match' and decision['confidence']>=.97 else 'review'
+    # A caption or two images cannot speak for a missing video or the rest of an album.
+    incomplete=bool(files) and len([f for f in files if not f['key'].startswith('post:')])>len(visuals)
+    status='archived_no_match' if result=='no_match' and decision['confidence']>=.97 and not incomplete else 'review'
     reason=('Сохранённый текст: совпадения с заданием нет. ' if status=='archived_no_match' else 'Сохранённый текст восстановлен; требуется сверка. ')+decision['reason']
-    proof={'result':decision,'evidence_type':'archived_caption_without_visuals','published_at':value['published_at'],
+    if visuals:reason='Проверены сохранённые текст и изображения. '+decision['reason']
+    proof={'result':decision,'evidence_type':'observed_archive' if visuals or incomplete else 'archived_caption_without_visuals','published_at':value['published_at'],
         'source_url':value.get('source_url'),'archive_checked_at':value.get('archive_checked_at')}
     worker.finish(job,status,reason,proof)
     store.execute('UPDATE campaign_checks SET archive_signature=?,next_try_at=? WHERE id=?',

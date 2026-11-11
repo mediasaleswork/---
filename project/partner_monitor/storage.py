@@ -95,6 +95,19 @@ class Store(AbstractContextManager):
           id INTEGER PRIMARY KEY,job_id TEXT NOT NULL REFERENCES campaign_checks(id),
           recorded_at TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,decision TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS campaign_review_history ON campaign_review_events(job_id,id);
+        CREATE TABLE IF NOT EXISTS candidate_versions(
+          partner_id INTEGER NOT NULL,signature TEXT NOT NULL,manifest TEXT NOT NULL,
+          PRIMARY KEY(partner_id,signature));
+        CREATE TABLE IF NOT EXISTS candidate_files(
+          key TEXT PRIMARY KEY,name TEXT NOT NULL,mime TEXT NOT NULL,expected INTEGER NOT NULL,
+          saved TEXT NOT NULL DEFAULT '',size INTEGER,md5 TEXT,drive_id TEXT NOT NULL DEFAULT '',
+          retry TEXT NOT NULL DEFAULT '',upload_retry TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '');
+        CREATE INDEX IF NOT EXISTS capture_due ON candidate_files(saved,retry);
+        CREATE INDEX IF NOT EXISTS upload_due ON candidate_files(drive_id,upload_retry);
+        CREATE TABLE IF NOT EXISTS candidate_parts(
+          partner_id INTEGER NOT NULL,signature TEXT NOT NULL,position INTEGER NOT NULL,mid INTEGER NOT NULL,
+          asset TEXT NOT NULL REFERENCES candidate_files(key),PRIMARY KEY(partner_id,signature,position));
+        CREATE INDEX IF NOT EXISTS archive_origins ON candidate_parts(asset);
         CREATE TABLE IF NOT EXISTS source_revisions (
           source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, revision_hash TEXT NOT NULL,
           payload TEXT NOT NULL, recorded_at TEXT NOT NULL,

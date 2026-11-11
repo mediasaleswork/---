@@ -42,7 +42,13 @@ def rows_for_partner(store,partner_id):
     rows=store.rows("""SELECT j.id,j.message_ids,j.status,j.reason,j.checked_at,j.next_try_at,j.candidate_snapshot,j.decision,
        r.opened_at,r.opened_reason,r.original_snapshot FROM campaign_reviews r JOIN campaign_checks j ON j.id=r.job_id
        WHERE j.partner_id=? ORDER BY CASE WHEN j.status IN ('match','no_match','obsolete') THEN 1 ELSE 0 END,r.opened_at DESC""",(partner_id,))
+    files={}
+    for item in store.rows('''SELECT j.id,a.position,f.key,f.name,f.saved,f.drive_id,f.error FROM campaign_checks j
+       JOIN candidate_parts a ON a.partner_id=j.partner_id AND a.signature=j.candidate_signature
+       JOIN candidate_files f ON f.key=a.asset WHERE j.partner_id=? ORDER BY j.id,a.position''',(partner_id,)):
+        files.setdefault(item['id'],[]).append(item)
     for row in rows:
+        row['archive_files']=files.get(row['id'],[])
         row['events']=store.rows('SELECT recorded_at,status,reason FROM campaign_review_events WHERE job_id=? ORDER BY id DESC LIMIT 8',(row['id'],))
     return rows
 
@@ -61,7 +67,7 @@ def original_missing(review):
     if review['status'] in {'unavailable','archived_no_match'}:return True
     try:value=json.loads(review.get('decision') or '{}')
     except (ValueError,TypeError):return False
-    return isinstance(value,dict) and value.get('evidence_type')=='archived_caption_without_visuals'
+    return isinstance(value,dict) and value.get('evidence_type') in {'archived_caption_without_visuals','observed_archive'}
 
 
 def ordered_reviews(partners):
@@ -95,8 +101,12 @@ def export_sheet(sheet,partners,timezone_name):
             'archived_no_match':'Архив — оригинал не открывается','match':'Реклама подтверждена','no_match':'Не относится к рекламе','obsolete':'Версия заменена'}
     headers=['Состояние','Площадки','Открыть / архив','Сохранённый текст','Причина сомнения','Опубликован','Добавлено на проверку',
              'Последняя проверка','Последний результат','Следующая попытка','Последние проверки','ID проверки','Адрес недоступного оригинала']
+    from openpyxl.utils import get_column_letter
+    ordered=ordered_reviews(partners)
+    max_files=max((len(r.get('archive_files',[]))-1 for _,r in ordered),default=0)
+    headers+=['Сохранено при обнаружении','Полная копия текста']+[f'Вложение {i+1}' for i in range(max_files)]
     values=[headers];metadata=[]
-    for partner,review in ordered_reviews(partners):
+    for partner,review in ordered:
         snapshot=saved_snapshot(review)
         ids=json.loads(review['message_ids']);mid=min(ids)
         url=f"https://t.me/{partner['username']}/{mid}" if partner.get('username') else f"https://t.me/c/{partner.get('private_channel_id') or partner.get('channel_id')}/{mid}"
@@ -109,7 +119,13 @@ def export_sheet(sheet,partners,timezone_name):
         values.append([labels.get(status,status),partner.get('title') or partner.get('username') or 'Закрытый канал',action,
                        snapshot.get('text','')[:16000],explanation(review['opened_reason']),local(snapshot.get('published_at'),tz),local(review['opened_at'],tz),
                        local(review['checked_at'],tz),explanation(review['reason']),next_try,events,review['id'],url if missing else ''])
-        metadata.append((snapshot,url,missing))
+        files=review.get('archive_files',[])
+        binaries=[f for f in files if not f['key'].startswith('post:')]
+        count=sum(bool(f['saved']) for f in binaries)
+        state=(f'Вложений сохранено: {count} из {len(binaries)}' if binaries else 'Текст, без файловых вложений') if files else 'Старая запись: полной копии нет'
+        values[-1].extend([state]+[('Открыть: '+f['name'] if f['drive_id'] else
+            ('На сервере: ' if f['saved'] else 'Ещё не сохранено: ')+f['name']) for f in files])
+        metadata.append((snapshot,url,missing,files))
     _write_table(sheet,values)
     for row in sheet.iter_rows():
         for cell in row:
@@ -117,7 +133,14 @@ def export_sheet(sheet,partners,timezone_name):
             cell.alignment=Alignment(vertical='top',wrap_text=True)
         sheet.row_dimensions[row[0].row].height=38 if row[0].row==1 else 86
     for cell in sheet[1]:cell.fill=PatternFill('solid',fgColor='F1F2F4')
-    for row,(snapshot,url,missing) in enumerate(metadata,2):
+    for row,(snapshot,url,missing,files) in enumerate(metadata,2):
+        for col,f in enumerate(files,15):
+            if f['drive_id']:
+                cell=sheet.cell(row,col)
+                cell.hyperlink='https://drive.google.com/open?id='+f['drive_id']
+                cell.font=Font(name='Arial',size=10,color='1567B0',underline='single')
+            elif f.get('error'):
+                sheet.cell(row,col).comment=Comment('Повтор запланирован. '+f['error'],'Partner Monitor')
         for col in (6,7,8,10):
             value=sheet.cell(row,col).value
             if value and str(value)[:4].isdigit():
@@ -130,10 +153,18 @@ def export_sheet(sheet,partners,timezone_name):
             if snapshot.get('text'):
                 cell.hyperlink=Hyperlink(ref=cell.coordinate,location=f"'Ручная проверка'!D{row}",display=cell.value)
                 cell.font=Font(name='Arial',size=10,color='1567B0',underline='single')
+            else:
+                first=next((f for f in files if f['drive_id'] and not f['key'].startswith('post:')),None)
+                if first:
+                    cell.value='Открыть сохранённое вложение'
+                    cell.hyperlink='https://drive.google.com/open?id='+first['drive_id']
+                    cell.comment=Comment('Оригинал недоступен. Здесь открывается сохранённый файл. Остальные вложения — справа.','Partner Monitor')
+                    cell.font=Font(name='Arial',size=10,color='1567B0',underline='single')
         else:sheet.cell(row,3).comment=Comment('Ссылка на исходную публикацию. Если доступность изменилась, сохранённый текст остаётся справа.','Partner Monitor')
         if sheet.cell(row,1).value=='Нужна ручная проверка':sheet.cell(row,1).fill=PatternFill('solid',fgColor='FFF1CC')
     for col,width in {'A':25,'B':24,'C':28,'D':64,'E':44,'F':21,'G':21,'H':21,'I':46,'J':28,'K':58,'L':12,'M':40}.items():sheet.column_dimensions[col].width=width
     sheet.column_dimensions['L'].hidden=True
+    for col in range(14,16+max(0,max_files)):sheet.column_dimensions[get_column_letter(col)].width=32
     sheet.freeze_panes='A2';sheet.print_title_rows='1:1'
     if len(values)>1:
         table=Table(displayName='ManualReview',ref=sheet.dimensions)

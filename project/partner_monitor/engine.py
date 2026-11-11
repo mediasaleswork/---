@@ -64,7 +64,9 @@ class Monitor:
         self._folder_checked = 0.0
         self.scope_ready = not config.channel_folder_watch
         if config.campaign_matching:
+            from .candidate_archive import CandidateArchive
             from .campaigns import CampaignWorker
+            self.store.candidate_archive = CandidateArchive(self)
             self.campaign_worker = CampaignWorker(self)
         if config.forwarded_intake:
             from .intake import ConversationIntake
@@ -132,6 +134,9 @@ class Monitor:
     async def record_post(self, partner, entity, members, reason, placements=()):
         """Persist and capture at discovery, before scanning the next message."""
         members = sorted(members, key=lambda m: m.id)
+        if placements and self.config.campaign_matching:
+            from .campaigns import candidate_signature
+            self.store.candidate_archive.observe(partner,members,candidate_signature(members))
         anchor = members[0]
         key = (partner["id"], getattr(anchor, "grouped_id", None) or f"m:{anchor.id}")
         lock = self._post_locks.setdefault(key, asyncio.Lock())
@@ -307,7 +312,9 @@ class Monitor:
         if not getattr(message, "grouped_id", None):
             return [message]
         neighbours = await self.client.get_messages(entity, ids=list(range(max(1, message.id - 9), message.id + 10)))
-        return sorted([m for m in neighbours if m and getattr(m, "grouped_id", None) == message.grouped_id], key=lambda m: m.id) or [message]
+        found={m.id:m for m in neighbours if m and getattr(m,"grouped_id",None)==message.grouped_id}
+        found.setdefault(message.id,message)
+        return sorted(found.values(),key=lambda m:m.id)
 
     async def discover(self, partner: dict, entity):
         placements = self.store.rows("SELECT * FROM placements WHERE partner_id=?", (partner["id"],))
@@ -584,11 +591,14 @@ async def run(config: Config, *, once: bool = False):
                 realtime = Realtime(monitor)
                 publisher = None
                 campaign_task = None
+                archivers = []
                 if not once:
                     realtime.start()
                     publisher = asyncio.create_task(report_loop(monitor))
                     if monitor.campaign_worker:
                         monitor.campaign_background = True
+                        archive=store.candidate_archive
+                        archivers=[asyncio.create_task(archive.run(upload)) for upload in (False,False,True)]
                         from .campaigns import campaign_loop
                         campaign_task = asyncio.create_task(campaign_loop(monitor))
                 try:
@@ -612,6 +622,9 @@ async def run(config: Config, *, once: bool = False):
                             if once:
                                 raise
                         if once:
+                            if monitor.campaign_worker:
+                                while await store.candidate_archive.process_one():pass
+                                while await store.candidate_archive.process_one(upload=True):pass
                             break
                         # Keep a 60-second schedule from start to start; work
                         # duration must not silently add another full minute.
@@ -621,6 +634,8 @@ async def run(config: Config, *, once: bool = False):
                         except asyncio.TimeoutError:
                             pass
                 finally:
+                    for task in archivers:task.cancel()
+                    if archivers:await asyncio.gather(*archivers,return_exceptions=True)
                     if not once:
                         await realtime.close()
                     if publisher:

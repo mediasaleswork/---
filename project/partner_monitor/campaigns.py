@@ -89,19 +89,35 @@ def model_identity(config):
 
 def candidate_signature(messages):
     content = combined_content(messages)
-    return digest([[(m.id, m.date.isoformat()) for m in messages], content.text, content.urls, content.media])
+    parts=[[(m.id, m.date.isoformat()) for m in messages], content.text, content.urls, content.media]
+    # Preserve distinct album layouts and edits to polls/location cards even
+    # if the aggregate text has not changed. Keep historical single-file keys.
+    from .candidate_archive import structured
+    from .message_content import message_content
+    if len(messages)>1:
+        parts.append([(m.id,c.text,c.urls,c.media) for m in messages if (c:=message_content(m))])
+    extras=[(m.id,extra) for m in messages if (extra:=structured(m)) is not None]
+    if extras:parts.append(extras)
+    return digest(parts)
 
 
 def enqueue(store, config, partner, messages, placements):
+    with store.transaction():
+        return _enqueue(store,config,partner,messages,placements)
+
+
+def _enqueue(store, config, partner, messages, placements):
     if not placements:
         return
     ids = sorted(m.id for m in messages)
+    candidate = candidate_signature(messages)
+    archive=getattr(store,'candidate_archive',None)
+    if archive:archive.observe(partner,messages,candidate)
     # Already attributed publications keep their evidence and original count.
     existing = store.rows("SELECT message_ids FROM posts WHERE partner_id=?", (partner["id"],))
     if any(set(ids).intersection(json.loads(p["message_ids"])) for p in existing):
         return
     source = source_signature(placements, model_identity(config))
-    candidate = candidate_signature(messages)
     ident = digest([partner["id"], ids, source, candidate])
     stamp = utcnow()
     actual = combined_content(messages)
@@ -118,8 +134,9 @@ def enqueue(store, config, partner, messages, placements):
         priority += 20
     snapshot=packed({'text':actual.text,'urls':actual.urls,'media':actual.media,
         'published_at':messages[0].date.isoformat(),'views':getattr(messages[0],'views',None)})
-    store.execute("""INSERT OR IGNORE INTO campaign_checks(id,partner_id,message_ids,placement_ids,
-        source_signature,candidate_signature,next_try_at,created_at,priority,candidate_snapshot) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+    store.execute("""INSERT INTO campaign_checks(id,partner_id,message_ids,placement_ids,
+        source_signature,candidate_signature,next_try_at,created_at,priority,candidate_snapshot) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET candidate_snapshot=excluded.candidate_snapshot WHERE campaign_checks.candidate_snapshot=''""",
         (ident, partner["id"], packed(ids), packed(sorted(p["id"] for p in placements)), source, candidate, stamp, stamp, priority,snapshot))
     for placement in placements:
         store.execute("UPDATE placements SET status='watching' WHERE id=? AND status='not_found'",(placement['id'],))

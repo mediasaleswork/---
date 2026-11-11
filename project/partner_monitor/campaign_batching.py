@@ -138,6 +138,8 @@ async def prepare(worker, group, ai_ready, offline=''):
             messages = [by_id[mid] for mid in json.loads(job['message_ids']) if mid in by_id]
             if len(messages) != len(json.loads(job['message_ids'])):
                 if offline and not job.get('provisional_decision'):
+                    from .archived_checks import local_archive_review
+                    if local_archive_review(worker,job,partner,own):continue
                     unavailable(worker,job,archived=job['status']=='archived_no_match')
                     continue
                 from .archived_checks import check_saved_caption
@@ -164,6 +166,8 @@ async def prepare(worker, group, ai_ready, offline=''):
                 worker.finish(job, 'obsolete', 'Публикация уже учтена')
                 continue
             actual = combined_content(messages)
+            if archive:=getattr(worker.store,'candidate_archive',None):
+                archive.observe(partner,messages,job['candidate_signature'])
             candidate = Candidate(job, partner, own, entity, messages, actual)
             snapshot = packed({'text': actual.text, 'urls': actual.urls, 'media': actual.media,
                                'published_at': messages[0].date.isoformat(), 'views': getattr(messages[0], 'views', None)})

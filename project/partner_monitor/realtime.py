@@ -105,7 +105,10 @@ class Realtime:
             if expand_albums and members[0].grouped_id:
                 # A difference page may end halfway through an album. Fetch
                 # neighbours before recording its canonical first message.
-                members = await self.monitor.album(members[0].peer_id, members[0])
+                neighbours=await self.monitor.album(members[0].peer_id, members[0])
+                found={m.id:m for m in neighbours}
+                for m in members:found.setdefault(m.id,m)
+                members=sorted(found.values(),key=lambda m:m.id)
             await self.monitor.process_live(members)
 
     async def _event(self, messages):

@@ -15,10 +15,10 @@ class TelegramAccess:
         while (delay := self.blocked_until - asyncio.get_running_loop().time()) > 0:
             await asyncio.sleep(delay)
 
-    async def request(self, operation):
+    async def request(self, operation, *, timeout=None):
         await self.wait()
         try:
-            return await asyncio.wait_for(operation(), timeout=self.request_timeout)
+            return await asyncio.wait_for(operation(), timeout=timeout or self.request_timeout)
         except errors.FloodWaitError as exc:
             self.blocked_until = max(self.blocked_until, asyncio.get_running_loop().time() + exc.seconds + 1)
             raise
@@ -34,6 +34,11 @@ class TelegramAccess:
 
     async def download_media(self, *args, **kwargs):
         return await self.request(lambda: self.raw.download_media(*args, **kwargs))
+
+    async def download_original(self, media, target, size):
+        # Keep the normal request timeout for small files; large original videos need longer.
+        return await self.request(lambda: self.raw.download_media(media,file=target),
+                                  timeout=max(self.request_timeout,min(14400,120+size/131072)))
 
     async def iter_messages(self, *args, **kwargs):
         iterator = self.raw.iter_messages(*args, **kwargs).__aiter__()

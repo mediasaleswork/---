@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock,Mock,patch
@@ -88,6 +89,23 @@ class IntakeTests(IsolatedAsyncioTestCase):
         self.assertFalse(row['saved'])
         self.assertTrue(row['retry'])
         self.assertFalse(restored.path('photo:76').exists())
+
+    async def test_new_photo_does_not_wait_for_history_backlog(self):
+        first=base.image_message(7,'История',91,200)
+        self.batch(candidates=[first]);await self.queue_only()
+        partner=self.store.rows('SELECT * FROM partners')[0]
+        self.store.execute('DELETE FROM candidate_fast')
+        archive=self.store.candidate_archive
+        for mid in range(8,20):
+            m=base.image_message(mid,'Старый материал',100+mid,200)
+            m.date=NOW-timedelta(days=1)
+            archive.observe(partner,[m],candidate_signature([m]))
+        latest=base.image_message(30,'Свежая публикация',133,200)
+        archive.observe(partner,[latest],candidate_signature([latest]))
+        self.client.attachments[133]=base.png('green')
+        self.assertTrue(await archive.process_one(realtime=True))
+        self.assertEqual(archive.path('photo:133').read_bytes(),self.client.attachments[133])
+        self.assertFalse(archive.path('photo:91').exists())
 
 
 class UploadTests(TestCase):

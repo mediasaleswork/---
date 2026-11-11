@@ -48,7 +48,22 @@ def attachments(message):
     for kind,plural in (('photo','photos'),('document','documents')):
         for item in [getattr(message,kind,None),*(getattr(rich,plural,None) or [])]:
             if getattr(item,'id',None):objects[f'{kind}:{item.id}']=item
-    for key in message_content(message).media:
+    # Embedded media can also be an accessible game/webpage or an extended-media
+    # item. A locked preview is metadata only; never fetch third-party URLs.
+    embedded={}
+    def walk(node,depth=0):
+        if node is None or depth>5:return
+        if isinstance(node,(types.Photo,types.Document)):
+            kind='photo' if isinstance(node,types.Photo) else 'document'
+            embedded[f'{kind}:{node.id}']=node
+            return
+        for field in ('photo','document','webpage','game','media','extended_media'):
+            child=getattr(node,field,None)
+            for item in child if isinstance(child,list) else [child]:
+                if item is not None and item is not node:walk(item,depth+1)
+    walk(getattr(message,'media',None))
+    objects.update(embedded)
+    for key in dict.fromkeys([*message_content(message).media,*embedded]):
         obj=objects.get(key)
         name=next((a.file_name for a in getattr(obj,'attributes',[]) if getattr(a,'file_name',None)),None)
         name=(name or (key.replace(':','-')+('.jpg' if key.startswith('photo:') else ''))).replace('\\','/').split('/')[-1]
@@ -109,6 +124,7 @@ class CandidateArchive:
         manifest={'channel_id':partner.get('channel_id'),'channel':partner.get('title') or target,
                   'url':f'https://t.me/{target}/{messages[0].id}','observed_at':utcnow(),'messages':[]}
         files={}
+        fresh=set()
         for m in messages:
             content=message_content(m)
             ms={'id':m.id,'published':m.date.isoformat(),'text':content.text,'urls':content.urls,'files':[]}
@@ -120,6 +136,8 @@ class CandidateArchive:
                 if obj is not None and (needed is None or key in needed):
                     self.targets[key]=obj
                     self.targets.move_to_end(key)
+                    observed=getattr(m,'edit_date',None) or m.date
+                    if observed>=datetime.now(timezone.utc)-timedelta(minutes=30):fresh.add(key)
             manifest['messages'].append(ms)
         while len(self.targets)>512:self.targets.popitem(last=False)
         if not existing:
@@ -131,6 +149,11 @@ class CandidateArchive:
                 for pos,(key,(name,mime,size,mid)) in enumerate(all_files):
                     self.store.execute('INSERT OR IGNORE INTO candidate_files(key,name,mime,expected) VALUES(?,?,?,?)',(key,name,mime,size))
                     self.store.execute('INSERT INTO candidate_parts VALUES(?,?,?,?,?)',(p,signature,pos,mid,key))
+        for key in fresh:
+            self.store.execute('INSERT OR IGNORE INTO candidate_fast VALUES(?,?)',(key,utcnow()))
+        for key in files:
+            if key in self.targets:
+                self.store.execute("UPDATE candidate_files SET retry='' WHERE key=? AND saved='' AND error='Telegram/диск: FileNotFoundError'",(key,))
         self.wake.set()
 
     def can_fetch(self,partner):
@@ -204,13 +227,21 @@ class CandidateArchive:
             self.reserved.pop(key,None)
             temp.unlink(missing_ok=True)
 
-    async def process_one(self,upload=False):
+    async def process_one(self,upload=False,realtime=False):
         cfg=self.monitor.config
         if upload and (not cfg.google_credentials or not cfg.drive_folder_id):return False
         if not upload and not getattr(self.monitor,'scope_ready',True):return False
+        now=utcnow()
         where="saved!='' AND drive_id='' AND upload_retry<=?" if upload else "saved='' AND retry<=?"
-        rows=self.store.rows('SELECT * FROM candidate_files WHERE '+where+
-                             ' ORDER BY '+('saved' if upload else "(key LIKE 'post:%'),rowid")+' LIMIT 8',(utcnow(),))
+        if upload and self.store.state('candidate_upload_pause','')>now:return False
+        rows=[]
+        if realtime:
+            rows=self.store.rows("""SELECT f.* FROM candidate_fast q JOIN candidate_files f ON f.key=q.asset
+                WHERE f.saved='' AND f.retry<=? ORDER BY q.seen DESC LIMIT 8""",(now,))
+            # Keep capacity for a live post; only help the history worker with small files.
+            where+=" AND (key LIKE 'post:%' OR key LIKE 'photo:%' OR expected BETWEEN 1 AND 1048576)"
+        rows+=self.store.rows('SELECT * FROM candidate_files WHERE '+where+
+                              ' ORDER BY '+('saved' if upload else "(key LIKE 'post:%'),rowid")+' LIMIT 8',(now,))
         row=next((r for r in rows if r['key'] not in self.busy),None)
         if not row:return False
         key=row['key'];self.busy.add(key)
@@ -229,20 +260,23 @@ class CandidateArchive:
             else:
                 await self.capture(row)
         except Exception as exc:
-            if not upload and isinstance(exc,errors.FileReferenceExpiredError):self.targets.pop(key,None)
+            if not upload and isinstance(exc,errors.RPCError) and not isinstance(exc,errors.FloodWaitError):self.targets.pop(key,None)
             column='upload_retry' if upload else 'retry'
             delay=max(60,int(getattr(exc,'seconds',0) or 0)+1)
             if isinstance(exc,FileNotFoundError):delay=900
             if upload:delay=max(delay,300)
+            response=getattr(exc,'response',None)
+            if upload and response is not None and (response.status_code in {401,403,429} or response.status_code>=500):
+                self.store.set_state('candidate_upload_pause',later(delay))
             detail=('Drive: ' if upload else 'Telegram/диск: ')+type(exc).__name__
             self.store.execute('UPDATE candidate_files SET '+column+'=?,error=? WHERE key=?',(later(delay),detail,key))
             log.warning('Архив кандидатов: %s; повтор через %s с',detail,delay)
         finally:self.busy.discard(key)
         return True
 
-    async def run(self,upload=False):
+    async def run(self,upload=False,realtime=False):
         while True:
             self.wake.clear()
-            if await self.process_one(upload):continue
+            if await self.process_one(upload,realtime):continue
             try:await asyncio.wait_for(self.wake.wait(),timeout=5)
             except asyncio.TimeoutError:pass

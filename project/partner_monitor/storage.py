@@ -108,6 +108,7 @@ class Store(AbstractContextManager):
           partner_id INTEGER NOT NULL,signature TEXT NOT NULL,position INTEGER NOT NULL,mid INTEGER NOT NULL,
           asset TEXT NOT NULL REFERENCES candidate_files(key),PRIMARY KEY(partner_id,signature,position));
         CREATE INDEX IF NOT EXISTS archive_origins ON candidate_parts(asset);
+        CREATE TABLE IF NOT EXISTS candidate_fast(asset TEXT PRIMARY KEY REFERENCES candidate_files(key),seen TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS source_revisions (
           source_chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, revision_hash TEXT NOT NULL,
           payload TEXT NOT NULL, recorded_at TEXT NOT NULL,

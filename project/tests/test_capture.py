@@ -102,6 +102,28 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "unsupported_content")
         self.assertIsNone(result.path)
 
+    async def test_complete_post_with_open_in_telegram_button_is_valid(self):
+        body = widget().replace('Real DOM fixture with a long publication</div>',
+             'Real DOM fixture with a long publication</div><a class="message_media_view_in_telegram">VIEW IN TELEGRAM</a>')
+        await self.route(body)
+        result = await self.capture.capture("telegram", [83], "complete",
+                         expected={83: {'text':'Real DOM fixture with a long publication', 'visuals':0}})
+        self.assertEqual(result.status, 'ok', result.error)
+
+    async def test_missing_expected_media_and_wrong_caption_are_rejected(self):
+        await self.route(widget())
+        for content in ({'text':'A different advertisement','visuals':0}, {'text':'Real DOM fixture','visuals':1}):
+            result = await self.capture.capture("telegram", [83], "incomplete", expected={83:content})
+            self.assertEqual(result.status, 'unsupported_content')
+
+    async def test_broken_visible_media_is_not_an_image_of_the_post(self):
+        body=widget().replace('Real DOM fixture with a long publication</div>',
+            'Real DOM fixture with a long publication</div><div class="tgme_widget_message_photo_wrap" '
+            'style="height:90px;background-image:url(data:image/png;base64,bm90YW5pbWFnZQ==)"></div>')
+        await self.route(body)
+        result=await self.capture.capture("telegram",[83],"broken")
+        self.assertEqual(result.status,'unsupported_content')
+
     async def test_album_combines_real_widget_screenshots(self):
         from PIL import Image
         async def respond(route):

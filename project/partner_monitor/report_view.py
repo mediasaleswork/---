@@ -103,6 +103,7 @@ def build_view(partners, posts, snapshots, timezone_name="Asia/Tashkent", month=
             "durations": durations, "until": local(until, tz), "state": state, "unavailable": unavailable,
             "unavailable_since": local(post.get("unavailable_since"), tz),
             "picture_path": picture["screenshot_path"] if picture else None,
+            "picture_url": picture.get("screenshot_url") if picture else None,
             "picture_at": local(picture.get("screenshot_at") or picture.get("checked_at"), tz) if picture else None,
             "picture_views": picture.get("views") if picture else None, "picture_note": picture_note,
             "picture_kind": "card" if is_card else "screenshot",

@@ -89,6 +89,9 @@ async def capture_private_card(capture, client, partner, messages, snapshot, url
                             pictures.setdefault(message.id,[]).append(await asyncio.to_thread(inline_picture, buffer.getvalue()))
                         else:
                             raise ValueError("private_photo_unavailable")
+                from .widget_content import expected_content
+                if len(pictures.get(message.id, ())) < expected_content(message)['visuals']:
+                    raise ValueError('missing_media_preview')
             if not any(message_content(m).text.strip() or pictures.get(m.id) for m in messages):
                 raise ValueError("publication_content_missing")
             public = bool(partner.get("username"))

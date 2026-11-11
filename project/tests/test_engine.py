@@ -119,6 +119,21 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.store.__exit__(None, None, None)
         self.tmp.cleanup()
 
+    async def test_failed_capture_keeps_existing_evidence_and_measurement(self):
+        client = FakeClient([message(1, "@partner_one", peer=100)], [message(4, "BRB", views=50)])
+        capture = FakeCapture()
+        monitor = Monitor(self.config, self.store, client, capture)
+        with patch("partner_monitor.engine.asyncio.sleep", new=AsyncMock()):
+            await monitor.tick()
+        partner = self.store.rows('SELECT * FROM partners')[0]
+        post = self.store.rows('SELECT * FROM posts')[0]
+        snap = self.store.rows('SELECT * FROM snapshots')[0]
+        capture.fail = True
+        await monitor.capture_snapshot(partner, post, snap)
+        after = self.store.rows('SELECT * FROM snapshots')[0]
+        for field in ('screenshot_path', 'screenshot_status', 'screenshot_at', 'checked_at', 'views'):
+            self.assertEqual(after[field], snap[field])
+
     async def test_two_cycles_and_restart_preserve_cursors_without_duplicates(self):
         client = FakeClient([message(1, "Новый партнёр @partner_one", peer=100)],
                             [message(1, "Editorial"), message(2, "BRB кредит", views=245)])

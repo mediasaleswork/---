@@ -240,7 +240,11 @@ def export_unified(partners, posts, snapshots, output_path, timezone="Asia/Tashk
         if note_text:
             visible_note = note_text if len(note_text) <= 160 else note_text[:157] + "…"
             information += "\n\n" + visible_note
+        if item.get("picture_url"):
+            information += "\n\nОткрыть изображение в полном размере ↗"
         data_cell = table_cell(row, 7, 9, information, fill, top)
+        if item.get("picture_url"):
+            data_cell.hyperlink = item["picture_url"]
         if note_text:
             data_cell.comment = Comment(note_text[:32767], "Partner Monitor")
         screenshot = table_cell(row, 10, 12, None, fill, top)

@@ -169,7 +169,7 @@ class Monitor:
                   VALUES (?,'initial',?,?,?,'pending')""", (post_id, post["first_seen_at"], utcnow(), getattr(anchor, "views", None)))
                 snapshot = self.store.rows("SELECT * FROM snapshots WHERE post_id=? AND due_key='initial'", (post_id,))[0]
                 complete_job(self.store, post_id, "initial", snapshot["checked_at"])
-                await self.capture_snapshot(partner, post, snapshot)
+                await self.capture_snapshot(partner, post, snapshot, members)
             self.changed.set()
             return post_id
 
@@ -438,25 +438,43 @@ class Monitor:
                   SELECT 1 FROM placement_posts WHERE placement_id=placements.id) THEN 'found' ELSE 'not_found' END
                   WHERE id=?""", (placement["id"],))
 
-    async def capture_snapshot(self, partner: dict, post: dict, snapshot: dict):
+    async def capture_snapshot(self, partner: dict, post: dict, snapshot: dict, messages=None):
+        if snapshot['id'] in self._capturing:
+            return
         self._attempted.add(snapshot["id"])
         self._capturing.add(snapshot["id"])
         try:
             key = f"post-{post['id']}-snapshot-{snapshot['id']}"
+            ids = json.loads(post["message_ids"])
+            capture_publication = getattr(self.capture, 'capture_publication', None)
+            if callable(capture_publication):
+                if messages is None:
+                    messages = await self.client.get_messages(types.PeerChannel(partner["channel_id"]), ids=ids)
+                actual = {m.id: m for m in messages if isinstance(m, types.Message) and
+                          getattr(m.peer_id, 'channel_id', None) == partner["channel_id"]}
+                if set(actual) != set(ids):
+                    raise ValueError('Telegram не вернул ожидаемые сообщения')
             if partner["username"]:
-                result = await self.capture.capture(partner["username"], json.loads(post["message_ids"]), key)
+                if callable(capture_publication):
+                    result = await capture_publication(partner["username"], [actual[mid] for mid in ids], key)
+                else:
+                    result = await self.capture.capture(partner["username"], ids, key)
             if not partner["username"] or result.status == "unsupported_content":
                 from .capture import CaptureResult
                 from .private_card import capture_private_card
                 entity = await self.client.get_entity(types.PeerChannel(partner["channel_id"]))
                 ids = json.loads(post["message_ids"])
-                members = await self.client.get_messages(entity, ids=ids)
+                members = messages if messages is not None else await self.client.get_messages(entity, ids=ids)
                 members = sorted([m for m in members if isinstance(m, types.Message)
                                   and isinstance(m.peer_id, types.PeerChannel) and m.peer_id.channel_id == entity.id], key=lambda m: m.id)
                 if not isinstance(entity, types.Channel) or not entity.broadcast or entity.id != partner["channel_id"] or [m.id for m in members] != sorted(ids):
                     result = CaptureResult(None, "unavailable", "Telegram не вернул оригинал публикации")
                 else:
                     result = await capture_private_card(self.capture, self.client, partner, members, snapshot, post["url"], key, self.config.timezone)
+            if not result.path and snapshot.get("screenshot_path") and snapshot.get("screenshot_status") in {'ok','success'}:
+                # Keep the preceding verified capture intact. A later measurement has its own attempts.
+                self.store.execute('UPDATE snapshots SET capture_attempts=capture_attempts+1 WHERE id=?',(snapshot['id'],))
+                return
             self.store.execute("""UPDATE snapshots SET screenshot_path=?,screenshot_status=?,screenshot_error=?,
               screenshot_at=?,next_capture_at=?,capture_attempts=capture_attempts+1 WHERE id=?""",
               (result.path, result.status, result.error, utcnow() if result.path else None,
@@ -464,7 +482,9 @@ class Monitor:
         except Exception as exc:
             log.warning("Ошибка скриншота поста %s: %s", post["id"], type(exc).__name__)
             retry=(datetime.now(timezone.utc)+timedelta(minutes=min(240,2**min(snapshot['capture_attempts'],8)))).isoformat()
-            self.store.execute("UPDATE snapshots SET screenshot_status='error',screenshot_error=?,next_capture_at=?,capture_attempts=capture_attempts+1 WHERE id=?", (type(exc).__name__, retry, snapshot["id"]))
+            self.store.execute("""UPDATE snapshots SET screenshot_status='error',screenshot_error=?,next_capture_at=?,
+                capture_attempts=capture_attempts+1 WHERE id=? AND NOT
+                (screenshot_status IN ('ok','success') AND screenshot_path IS NOT NULL)""", (type(exc).__name__, retry, snapshot["id"]))
         finally:
             self._capturing.discard(snapshot["id"])
 
@@ -512,9 +532,9 @@ class Monitor:
                   VALUES (?,?,?,?,?,'pending')""", (post["id"], key, due_at, utcnow(), views))
                 snapshot = self.store.rows("SELECT * FROM snapshots WHERE post_id=? AND due_key=?", (post["id"], key))[0]
                 complete_job(self.store, post["id"], key, snapshot["checked_at"])
-                await self.capture_snapshot(partner, post, snapshot)
+                await self.capture_snapshot(partner, post, snapshot, available)
             for snapshot in retries:
-                await self.capture_snapshot(partner, post, snapshot)
+                await self.capture_snapshot(partner, post, snapshot, available)
 
     async def tick(self):
         self.store.set_state('monitor_tick_started_at',utcnow())

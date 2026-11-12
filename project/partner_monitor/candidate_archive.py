@@ -178,10 +178,8 @@ class CandidateArchive:
         # Only evict a local cache copy after Drive confirmed its bytes and checksum.
         required=max(size,1024**2)+RESERVE+sum(self.reserved.values())
         if shutil.disk_usage(self.root).free>=required:return
-        for item in self.store.rows("SELECT key FROM candidate_files WHERE drive_id!='' ORDER BY saved"):
-            if item['key'] in self.busy:continue
-            self.path(item['key']).unlink(missing_ok=True)
-            if shutil.disk_usage(self.root).free>=required:return
+        # The independent cache worker checks current Drive metadata. Saved
+        # images also serve the offline matcher, even after an upload.
         raise OSError('Недостаточно места; неподтверждённые копии сохранены')
 
     async def capture(self,row):

@@ -281,6 +281,19 @@ class DifferenceTests(unittest.TestCase):
 
 
 class TelegramAccessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_preserves_telegram_flood_deadline(self):
+        from unittest.mock import Mock
+        state = {}
+        store = Mock()
+        store.state.side_effect = state.get
+        store.set_state.side_effect = state.__setitem__
+        raw = FakeClient()
+        raw.entities['flood'] = errors.FloodWaitError(request=None,capture=120)
+        with self.assertRaises(errors.FloodWaitError):
+            await TelegramAccess(raw,store).get_entity('flood')
+        restarted = TelegramAccess(raw,store)
+        self.assertGreater(restarted.blocked_until - asyncio.get_running_loop().time(),119)
+
     async def test_flood_wait_pauses_new_requests_across_all_modes(self):
         raw = FakeClient()
         raw.entities["flood"] = errors.FloodWaitError(request=None, capture=17)

@@ -49,7 +49,7 @@ def client_for(config: Config) -> TelegramClient:
 class Monitor:
     def __init__(self, config: Config, store: Store, client, capture):
         self.config, self.store, self.capture = config, store, capture
-        self.client = TelegramAccess(client)
+        self.client = TelegramAccess(client, store)
         self.wake = asyncio.Event()
         self.changed = asyncio.Event()
         self.source_peer_id = None
@@ -653,6 +653,8 @@ async def run(config: Config, *, once: bool = False):
                         archive=store.candidate_archive
                         archivers=[asyncio.create_task(archive.run(realtime=True)),asyncio.create_task(archive.run()),
                                    asyncio.create_task(archive.run(text_only=True)),asyncio.create_task(archive.run(upload=True))]
+                        from .cache_retention import maintain_cache
+                        archivers.append(asyncio.create_task(maintain_cache(config)))
                         from .history_scan import historical_comparisons, history_loop
                         archivers.append(asyncio.create_task(history_loop(monitor)))
                         archivers.append(asyncio.create_task(historical_comparisons(monitor)))

@@ -2,13 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from telethon import errors
 
 
 class TelegramAccess:
-    def __init__(self, client):
+    def __init__(self, client, store=None):
         self.raw = client
+        self.store = store
         self.blocked_until = 0.0
+        if store is not None:
+            remaining = float(store.state('telegram_resume_epoch','0')) - time.time()
+            if remaining > 0:
+                self.blocked_until = time.monotonic() + remaining
         self.request_timeout = 120
 
     async def wait(self):
@@ -21,6 +27,9 @@ class TelegramAccess:
             return await asyncio.wait_for(operation(), timeout=timeout or self.request_timeout)
         except errors.FloodWaitError as exc:
             self.blocked_until = max(self.blocked_until, asyncio.get_running_loop().time() + exc.seconds + 1)
+            if self.store is not None:
+                resume = max(float(self.store.state('telegram_resume_epoch','0')),time.time()+exc.seconds+1)
+                self.store.set_state('telegram_resume_epoch', str(resume))
             raise
 
     async def __call__(self, request):

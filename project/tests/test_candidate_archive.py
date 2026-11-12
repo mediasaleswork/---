@@ -27,6 +27,75 @@ class IntakeTests(IsolatedAsyncioTestCase):
     batch=queue.QueueTests.batch
     queue_only=queue.QueueTests.queue_only
 
+    async def test_cache_expiry_replay_edit_and_prior_month_report(self):
+        from openpyxl import load_workbook
+        from PIL import Image
+        from partner_monitor.cache_retention import sweep
+        from partner_monitor.campaigns import enqueue
+        from partner_monitor.reports import export_xlsx
+
+        current = message(8, 'Supported edit window')
+        self.batch(candidates=[current])
+        await self.queue_only()
+        previous = (NOW.replace(day=1) - timedelta(days=1)).replace(day=15)
+        old = message(7, 'Last month', date=previous)
+        old.media = types.MessageMediaDocument(document=types.Document(
+            id=888, access_hash=2, file_reference=b'test', date=previous, mime_type='video/mp4',
+            size=5, dc_id=2, attributes=[types.DocumentAttributeFilename('fixture.mp4')]))
+        partner = self.store.rows('SELECT * FROM partners')[0]
+        placements = self.store.rows('SELECT * FROM placements')
+        await self.monitor.record_post(partner, old.peer_id, [old], 'test historical match', placements)
+        picture = self.root / 'evidence.png'
+        Image.new('RGB',(100,120),'blue').save(picture)
+        self.store.execute('UPDATE snapshots SET screenshot_status=?,screenshot_path=?', ('ok',str(picture)))
+        archive = self.store.candidate_archive
+        path = archive.path('document:888')
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(b'video')
+        md5 = hashlib.md5(path.read_bytes()).hexdigest()
+        self.store.execute("UPDATE candidate_files SET size=5,md5=?,saved=?,drive_id='remote' WHERE key='document:888'",
+                           (md5,previous.isoformat()))
+        cfg = SimpleNamespace(runtime_dir=path.parent.parent,db_path=self.root/'monitor.sqlite3',drive_folder_id='folder')
+        tag = hashlib.sha256(('document:888:'+md5).encode()).hexdigest()
+        remote = dict(id='remote',parents=['folder'],trashed=False,size='5',md5Checksum=md5,
+                      capabilities={'canDownload':True},appProperties={'msbrb_candidate':tag})
+        reporter = Mock(drive_folder_id='folder')
+        reporter._json.return_value = remote
+
+        def report():
+            book = load_workbook(export_xlsx(*self.store.dump(), self.root/'report.xlsx', month=previous.strftime('%Y-%m')))
+            try:
+                sheet = book['Реестр публикаций']
+                values = list(sheet.values)
+                self.assertIn('https://t.me/partner_one/7', str(values))
+                self.assertGreater(len(book['Отчёт']._images), 0)
+                return values
+            finally:
+                book.close()
+
+        before = report()
+        with patch('partner_monitor.cache_retention.verify_private_folder'):
+            self.assertEqual(sweep(cfg,1,reporter=reporter)['bytes'],5)
+            self.assertTrue(path.exists())
+            remote['trashed']=True
+            self.assertEqual(sweep(cfg,1,reporter=reporter,apply=True)['verified'],0)
+            self.assertTrue(path.exists())
+            remote['trashed']=False
+            self.assertEqual(sweep(cfg,1,reporter=reporter,apply=True)['verified'],1)
+        self.assertFalse(path.exists())
+        def counts():
+            return tuple(self.store.rows('SELECT COUNT(*) n FROM '+t)[0]['n'] for t in
+                         ('candidate_versions','candidate_files','posts','placement_posts','campaign_checks'))
+        saved = counts()
+        enqueue(self.store,self.config,partner,[old],placements)
+        self.assertEqual(counts(),saved)
+        self.assertFalse(path.exists())
+        current.message='Edited inside the supported period'
+        enqueue(self.store,self.config,partner,[current],placements)
+        self.assertEqual(counts()[0],saved[0]+1)
+        self.assertEqual(counts()[4],saved[4]+1)
+        self.assertEqual(report(),before)
+
     async def test_deleted_photo_only_uses_saved_pixels_after_restart(self):
         msg=base.image_message(7,'',710,200)
         self.batch(candidates=[msg])

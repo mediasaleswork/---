@@ -11,6 +11,7 @@ import shutil
 
 from telethon import errors, types
 
+from .candidate_drive import ReportStorageReserve
 from .message_content import message_content
 from .parsing import PartnerReference
 from .storage import utcnow
@@ -265,6 +266,13 @@ class CandidateArchive:
                 self.monitor.changed.set()
             else:
                 await self.capture(row)
+        except ReportStorageReserve as exc:
+            retry = later(900)
+            if exc.pause_all:
+                self.store.set_state('candidate_upload_pause', retry)
+            self.store.execute('UPDATE candidate_files SET upload_retry=?,error=? WHERE key=?',
+                               (retry, str(exc), key))
+            log.info('Архив на сервере сохранён. %s', exc)
         except Exception as exc:
             if not upload and isinstance(exc,errors.RPCError) and not isinstance(exc,errors.FloodWaitError):self.targets.pop(key,None)
             column='upload_retry' if upload else 'retry'

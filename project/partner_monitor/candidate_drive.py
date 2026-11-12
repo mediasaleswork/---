@@ -4,13 +4,23 @@ import re
 from urllib.parse import urlsplit
 
 
+REPORT_RESERVE_BYTES = 256 * 1024**2
+
+
+class ReportStorageReserve(Exception):
+    def __init__(self, remaining):
+        self.pause_all = remaining <= REPORT_RESERVE_BYTES
+        super().__init__('Drive: место зарезервировано для таблицы и снимков')
+
+
 def verify_private_folder(reporter):
     meta=reporter._json('GET','https://www.googleapis.com/drive/v3/files/'+reporter.drive_folder_id,
-                        params={'fields':'mimeType,trashed,permissions(type),capabilities(canAddChildren)','supportsAllDrives':'true'})
+                        params={'fields':'mimeType,driveId,trashed,permissions(type),capabilities(canAddChildren)','supportsAllDrives':'true'})
     if (meta.get('trashed') or meta.get('mimeType')!='application/vnd.google-apps.folder'
         or not meta.get('capabilities',{}).get('canAddChildren') or not meta.get('permissions')
         or any(p.get('type')=='anyone' for p in meta['permissions'])):
         raise ValueError('Для вложений требуется закрытая папка архива')
+    reporter.in_shared_drive = bool(meta.get('driveId'))
 
 
 def upload_file(reporter,path,row):
@@ -25,6 +35,13 @@ def upload_file(reporter,path,row):
     for file in found.get('files',[]):
         if verified(file):return file['id']
     if not path.is_file() or path.stat().st_size!=row['size']:raise OSError('Нет проверенной локальной копии')
+    if not getattr(reporter, 'in_shared_drive', False):
+        quota = reporter._json('GET', 'https://www.googleapis.com/drive/v3/about',
+                               params={'fields': 'storageQuota(limit,usage)'})['storageQuota']
+        if 'limit' in quota:
+            remaining = int(quota['limit']) - int(quota['usage'])
+            if remaining - row['size'] < REPORT_RESERVE_BYTES:
+                raise ReportStorageReserve(remaining)
     metadata={'name':row['name'],'mimeType':row['mime'],'parents':[reporter.drive_folder_id],
               'appProperties':{'msbrb_candidate':tag}}
     start=reporter.session.request('POST','https://www.googleapis.com/upload/drive/v3/files',

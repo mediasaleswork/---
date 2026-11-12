@@ -10,7 +10,7 @@ from telethon import types
 from openpyxl import Workbook
 
 from partner_monitor.candidate_archive import CandidateArchive
-from partner_monitor.candidate_drive import upload_file
+from partner_monitor.candidate_drive import REPORT_RESERVE_BYTES, ReportStorageReserve, upload_file
 from partner_monitor.campaigns import candidate_signature
 from partner_monitor.review_queue import export_sheet
 import test_campaign_queue as queue
@@ -112,13 +112,25 @@ class IntakeTests(IsolatedAsyncioTestCase):
 
 
 class UploadTests(TestCase):
+    def test_candidate_cannot_use_space_needed_to_publish_confirmed_posts(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'sample'
+            path.write_bytes(b'video')
+            row = {'key':'document:42', 'size':5, 'md5':hashlib.md5(b'video').hexdigest()}
+            reporter = SimpleNamespace(drive_folder_id='private', session=Mock(), _json=Mock())
+            reporter._json.side_effect = [{'files':[]}, {'storageQuota':{'limit':str(REPORT_RESERVE_BYTES+4),'usage':'0'}}]
+            with self.assertRaises(ReportStorageReserve):
+                upload_file(reporter, path, row)
+            reporter.session.request.assert_not_called()
+            self.assertEqual(path.read_bytes(), b'video')
+
     def test_remote_id_requires_matching_content_and_reuses_an_existing_verified_upload(self):
         with tempfile.TemporaryDirectory() as root:
             path=Path(root)/'blob'
             path.write_bytes(b'abcdef')
             row={'size':6,'md5':hashlib.md5(b'abcdef').hexdigest(),'name':'test.pdf','mime':'application/pdf','key':'document:1'}
             remote={'id':'validid','size':'6','md5Checksum':row['md5']}
-            reporter=SimpleNamespace(_json=Mock(return_value={'files':[]}),session=Mock(),drive_folder_id='private')
+            reporter=SimpleNamespace(_json=Mock(return_value={'files':[]}),session=Mock(),drive_folder_id='private',in_shared_drive=True)
             start=Mock(headers={'Location':'https://www.googleapis.com/upload/session'})
             end=Mock();end.json.return_value={**remote,'md5Checksum':'wrong'}
             reporter.session.request.side_effect=[start,end]

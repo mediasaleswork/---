@@ -5,11 +5,35 @@ import json
 import re
 import sqlite3
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def stamp():
     return datetime.now(timezone.utc).isoformat()
+
+
+def source_digest(title, text, published, links):
+    return hashlib.sha256(json.dumps([title,text,published,links], ensure_ascii=False).encode()).hexdigest()
+
+
+def old_sources(db, now, days, *, apply=False, batch=32):
+    if not 30 <= days <= 3650:
+        raise ValueError('source retention must cover the supported 30-day lookback')
+    cutoff = (now-timedelta(days=days)).isoformat()
+    filters = """FROM sources s WHERE processed=1 AND published<? AND
+        (coalesce(text,'')<>'' OR coalesce(title,'')<>'' OR coalesce(links,'[]')<>'[]')
+        AND s.url NOT IN (SELECT source_url FROM publications WHERE source_url IS NOT NULL
+          UNION SELECT source_url FROM publication_revisions WHERE source_url IS NOT NULL
+          UNION SELECT json_extract(payload,'$.source_url') FROM leads WHERE json_extract(payload,'$.source_url') IS NOT NULL)"""
+    if not apply:
+        row = db.execute('SELECT count(*),min(published),max(published),sum(length(cast(text as blob))) '+filters,(cutoff,)).fetchone()
+        return dict(cutoff=cutoff, count=row[0], first=row[1], last=row[2], text_bytes=row[3] or 0)
+    with db:
+        db.execute('BEGIN IMMEDIATE')
+        rows=db.execute('SELECT id,title,text,published,links '+filters+' ORDER BY published,id LIMIT ?', (cutoff,batch)).fetchall()
+        db.executemany("UPDATE sources SET title='',text='',links='[]',compacted_hash=? WHERE id=?",
+                       [(source_digest(*r[1:]),r[0]) for r in rows])
+    return len(rows)
 
 
 def normalized(value):
@@ -44,6 +68,9 @@ class Store:
           CREATE TABLE IF NOT EXISTS publication_revisions(lead_id TEXT,source_url TEXT,payload TEXT,
             PRIMARY KEY(lead_id,source_url,payload));
         """)
+        if 'compacted_hash' not in {r[1] for r in self.db.execute('PRAGMA table_info(sources)')}:
+            self.db.execute('ALTER TABLE sources ADD COLUMN compacted_hash TEXT')
+        self.db.create_function('source_digest',4,source_digest,deterministic=True)
         self.db.execute('INSERT OR IGNORE INTO publications SELECT id,json_extract(payload,\'$.source_url\'),payload,created FROM leads')
         self.db.commit()
 
@@ -64,13 +91,18 @@ class Store:
 
     def add_source(self, item):
         sid = hashlib.sha256(item["url"].encode()).hexdigest()[:20]
-        self.db.execute("""INSERT INTO sources(id,url,title,text,published,checked,origin,links)
+        checked=stamp()
+        changed=self.db.execute("""INSERT INTO sources(id,url,title,text,published,checked,origin,links)
           VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-            processed=CASE WHEN (sources.title,sources.text,sources.published,sources.links) IS NOT
+            processed=CASE WHEN sources.compacted_hash IS NOT NULL OR (sources.title,sources.text,sources.published,sources.links) IS NOT
               (excluded.title,excluded.text,excluded.published,excluded.links) THEN 0 ELSE sources.processed END,
             title=excluded.title,text=excluded.text,published=excluded.published,links=excluded.links,
-            origin=excluded.origin,checked=excluded.checked""",
-          (sid, item["url"], item["title"], item["text"], item["published"], stamp(), item["origin"], json.dumps(item.get("links", []))))
+            origin=excluded.origin,checked=excluded.checked,compacted_hash=NULL
+          WHERE sources.compacted_hash IS NULL OR sources.compacted_hash<>
+            source_digest(excluded.title,excluded.text,excluded.published,excluded.links)""",
+          (sid, item["url"], item["title"], item["text"], item["published"], checked, item["origin"], json.dumps(item.get("links", []))))
+        if not changed.rowcount:
+            self.db.execute('UPDATE sources SET checked=?,origin=? WHERE id=?',(checked,item['origin'],sid))
         self.db.commit()
 
     def pending(self, since, cursor=None, oldest_first=False):

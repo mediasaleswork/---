@@ -177,6 +177,16 @@ def run_locked(cfg, once):
                         store.set_state("next_retry", "")
                 # Retry Google writes independently of source collection.
                 sheet.sync(store)
+                policy = cfg.data_dir / 'storage-retention.json'
+                if policy.exists():
+                    try:
+                        from .audit_storage import pack
+                        from .store import old_sources
+                        storage = json.loads(policy.read_text(encoding='utf8'))
+                        old_sources(store.db, now, int(storage['source_days']), apply=True)
+                        pack(cfg.data_dir, int(storage['audit_hours']), apply=True, limit=1)
+                    except Exception:
+                        log.exception('Storage maintenance deferred')
                 if once:
                     return
             except Exception as exc:

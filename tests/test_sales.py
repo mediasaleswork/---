@@ -36,6 +36,45 @@ class SalesTests(unittest.TestCase):
         self.store.close()
         self.temp.cleanup()
 
+    def test_retention_replay_edit_and_previous_month_evidence(self):
+        from sales_agent.store import old_sources
+        now=NOW+timedelta(days=32)
+        lead=validate(candidate(self.source['id']),{self.source['id']:self.source},NOW)
+        self.store.add_lead(lead)
+        other=dict(url='https://t.me/spotuz/124',title='old',text='ordinary',origin='test',
+                   published=NOW.isoformat(),links=[])
+        self.store.add_source(other)
+        with self.store.db:
+            self.store.db.execute('UPDATE sources SET processed=1')
+        self.assertEqual(old_sources(self.store.db,now,30)['count'],1)
+        self.assertEqual(old_sources(self.store.db,now,30,apply=True),1)
+        self.store.add_source(other)
+        row=self.store.db.execute('SELECT text,processed FROM sources WHERE url=?',(other['url'],)).fetchone()
+        self.assertEqual(tuple(row),('',1))
+        self.store.add_source(dict(other,published=now.isoformat(),text='corrected'))
+        self.assertEqual(self.store.pending((now-timedelta(days=14)).isoformat())[0]['text'],'corrected')
+        self.assertEqual(self.store.publications(),[lead])
+        self.assertEqual(self.store.db.execute('SELECT text FROM sources WHERE url=?',(lead['source_url'],)).fetchone()[0],TEXT)
+
+    def test_audit_archive_round_trip_leaves_live_database(self):
+        from sales_agent.audit_storage import pack
+        import gzip, sqlite3
+        from contextlib import closing
+        folder=self.root/'brand-repair-20261109T080000'
+        folder.mkdir()
+        (folder/'sheets.json').write_text('[]')
+        path=folder/'sales.sqlite3'
+        with closing(sqlite3.connect(path)) as snapshot:
+            self.store.db.backup(snapshot)
+        original=path.read_bytes()
+        self.assertEqual(len(pack(self.root,0)),1)
+        self.assertTrue(path.exists())
+        self.assertEqual(len(pack(self.root,0,apply=True)),1)
+        self.assertFalse(path.exists())
+        self.assertEqual(gzip.decompress(path.with_suffix('.sqlite3.gz').read_bytes()),original)
+        self.assertEqual(pack(self.root,0,apply=True),[])
+        self.assertEqual(self.store.pending('2000')[0]['text'],TEXT)
+
     def test_exact_evidence_required_and_only_source_url_is_used(self):
         good=candidate(self.source['id'])
         good['source_url']='https://fake.example'

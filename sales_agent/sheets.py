@@ -240,7 +240,17 @@ class Sheets:
             structure.append({'updateDimensionProperties':{'range':{'sheetId':sid,'dimension':'ROWS','startIndex':previous,'endIndex':previous+len(additions)},'properties':{'pixelSize':116 if name=='Лиды' else 190},'fields':'pixelSize'}})
             for table in sh.get('tables',[]):
                 if table.get('name') in {'MediasalesLeads','MediasalesScripts'} and table['range'].get('endRowIndex',0)<previous+len(additions):
-                    structure.append({'updateTable':{'table':{'tableId':table['tableId'],'range':dict(table['range'],endRowIndex=previous+len(additions))},'fields':'range'}})
+                    new_range=dict(table['range'],endRowIndex=previous+len(additions))
+                    active_filter=sh.get('basicFilter') or {}
+                    # A range filter must match the native table exactly. Resize
+                    # both in the same atomic batch so older hidden rows stay
+                    # filtered even when later sorting moves them down the grid.
+                    resize_filter=active_filter.get('range')==table['range'] and not active_filter.get('tableId')
+                    if resize_filter:
+                        structure.append({'clearBasicFilter':{'sheetId':sid}})
+                    structure.append({'updateTable':{'table':{'tableId':table['tableId'],'range':new_range},'fields':'range'}})
+                    if resize_filter:
+                        structure.append({'setBasicFilter':{'filter':{**active_filter,'range':new_range}}})
             if name=='Лиды':
                 for column,pattern in [(5,'dd.mm.yyyy hh:mm'),(15,'yyyy-mm-dd hh:mm')]:
                     structure.append({'repeatCell':{'range':{'sheetId':sid,'startRowIndex':previous,'endRowIndex':previous+len(additions),'startColumnIndex':column,'endColumnIndex':column+1},

@@ -198,6 +198,30 @@ class SyncLifecycleTests(unittest.TestCase):
         self.sheet.sync(self.store);self.assert_order()
         self.assertEqual(self.sheet.rows['Лиды'][1][0],fresh['id'])
 
+    def test_native_lead_table_growth_preserves_range_filter(self):
+        self.add('Existing'); self.sheet.sync(self.store)
+        self.add('Fresh', 10)
+        meta=self.sheet.verify()
+        tab=next(s for s in meta['sheets'] if s['properties']['title']=='Лиды')
+        sheet_id=tab['properties']['sheetId']
+        area={'sheetId':sheet_id,'startRowIndex':0,'endRowIndex':2,'startColumnIndex':0,'endColumnIndex':18}
+        specs=[{'columnIndex':8,'filterCriteria':{'hiddenValues':['https://example.invalid/news']}}]
+        tab.update(tables=[{'tableId':'lead-table','name':'MediasalesLeads','range':area}],
+                   basicFilter={'range':area,'filterSpecs':specs})
+        self.sheet.verify=lambda:meta
+        original=self.sheet.api
+        batches=[]
+        def trace(method,path='',**kwargs):
+            if path==':batchUpdate':
+                batches.append(kwargs['json']['requests'])
+            return original(method,path,**kwargs)
+        self.sheet.api=trace
+        self.sheet.sync(self.store)
+        atomic=[r for r in batches[0] if 'clearBasicFilter' in r or 'updateTable' in r or
+                r.get('setBasicFilter',{}).get('filter',{}).get('range',{}).get('sheetId')==sheet_id]
+        self.assertEqual([next(iter(r)) for r in atomic],['clearBasicFilter','updateTable','setBasicFilter'])
+        self.assertEqual(atomic[-1]['setBasicFilter']['filter'],{'range':dict(area,endRowIndex=3),'filterSpecs':specs})
+
     def test_failed_sort_after_refresh_recovers_and_keeps_custom_script(self):
         old=self.add('Old',0);self.add('Recent',10);self.sheet.sync(self.store)
         self.row('Скрипты',old['id'])[2]='Manual script'

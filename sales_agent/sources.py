@@ -43,7 +43,15 @@ def fetch(url):
 
 
 def clean(value):
-    return re.sub(r"\s+", " ", BeautifulSoup(value or "", "html.parser").get_text(" ", strip=True)).strip()
+    soup = BeautifulSoup(value or "", "html.parser")
+    # Preserve explicit line breaks so a standalone ad label stays distinct
+    # from the same word used in a sentence.
+    for node in soup.select('br'):
+        node.replace_with('\n')
+    for node in soup.select('p'):
+        node.append('\n')
+    return '\n'.join(line for part in soup.get_text(' ').splitlines()
+                     if (line := re.sub(r'\s+', ' ', part).strip()))
 
 
 def link_host(url):
@@ -182,5 +190,5 @@ def collect(cfg, store, now):
 
 
 def relevant(item):
-    from .rules import EVENTS,is_advertisement
-    return (is_advertisement(item['text']) or any(pattern.search(item['text']) for _,pattern in EVENTS)) and not NEGATIVE.search(item["title"])
+    from .rules import is_advertisement
+    return is_advertisement(item['text']) and not NEGATIVE.search(item["title"])

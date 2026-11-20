@@ -13,7 +13,7 @@ from sales_agent.sources import parse_feed, parse_telegram, relevant
 from sales_agent.store import Store
 
 NOW = datetime(2026,11,9,5,tzinfo=timezone.utc)
-TEXT = 'Компания TestBrand открыла новый магазин в Ташкенте и планирует расширить присутствие в Узбекистане.'
+TEXT = 'Компания TestBrand открыла новый магазин в Ташкенте и планирует расширить присутствие в Узбекистане. Реклама'
 
 
 def candidate(sid):
@@ -410,8 +410,8 @@ class SalesTests(unittest.TestCase):
 
     def test_unknown_brand_and_uzbek_brand_use_literal_evidence(self):
         for body,name in [
-            ('Asterium запускает новый продукт для предпринимателей Узбекистана с удобными финансовыми инструментами.','Asterium'),
-            ('Orzu kompaniyasi yangi do‘konini ishga tushirdi, unda Toshkent aholisi uchun keng mahsulot tanlovi mavjud.','Orzu')]:
+            ('Asterium запускает новый продукт для предпринимателей Узбекистана с удобными финансовыми инструментами. Реклама','Asterium'),
+            ('Orzu kompaniyasi yangi do‘konini ishga tushirdi, unda Toshkent aholisi uchun keng mahsulot tanlovi mavjud. Reklama','Orzu')]:
             row=dict(self.source,text=body,title=body)
             found=RuleResearcher().classify([row],NOW)
             self.assertTrue(found,body)
@@ -543,7 +543,7 @@ class SalesTests(unittest.TestCase):
             ("Qanday bonuslar va imtiyozlar kundalik hayotingizda muhim? Soʻrovnoma anonim boʻlib, taxminan 5 daqiqa vaqt oladi. #reklama",[])]:
             self.assertEqual([c['company'] for c in rules.classify([dict(self.source,text=body,title=body)],NOW)],expected)
         examples=[
-            ('Турецкая OYAK рассматривает участие в проекте. Глава компании Мурат Ялчинташ обозначил направления для расширения сотрудничества.', 'OYAK'),
+            ('Турецкая OYAK рассматривает участие в проекте. Глава компании Мурат Ялчинташ обозначил направления для расширения сотрудничества. Реклама', 'OYAK'),
             ('Samarqanddagi “Ipak yo‘li” turizm va madaniy meros xalqaro universiteti Xitoyning Guilin Tourism University bilan hamkorlikda qabul e’lon qildi. Reklama','“Ipak yo‘li” turizm va madaniy meros xalqaro universiteti')]
         for text,company in examples:
             row=dict(self.source,title=text,text=text)

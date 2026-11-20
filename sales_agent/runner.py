@@ -103,7 +103,7 @@ def cycle(cfg, store, *, now=None, researcher=None, collect_sources=True):
         new_publications=store.db.execute('SELECT COUNT(*) FROM publications').fetchone()[0]-publications_before
         detail = "Новых компаний: "+str(new_count)+", публикаций: "+str(new_publications)+". История размещений — на листе «Публикации». Перед обращением нужна проверка CRM"
         if not had_candidates:
-            detail += "; в очереди нет свежих коммерческих сигналов"
+            detail += "; в очереди нет свежих рекламных публикаций"
         if not available:
             status="error"
             detail += "; ни один источник не ответил в этом цикле"

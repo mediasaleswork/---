@@ -34,7 +34,11 @@ HYPOTHESES = {
     'лицензирование':'Возможно, после получения лицензии компания готовит выход к клиентам; запуск и потребность ещё нужно уточнить.',
 }
 
-AD_MARKER=re.compile(r'\(\s*(?:реклама|на\s+правах\s+рекламы|reklama|advertisement)\s*\)|(?<!\w)#(?:реклама|reklama|ad)\b|(?<!\w)(?:реклама|на\s+правах\s+рекламы|reklama|advertisement)\s*[.!]?\s*$',re.I)
+AD_LABEL = r'(?:реклама|на\s+правах\s+рекламы|reklama|advertisement)'
+AD_TAG = re.compile(r'(?<!\w)#(?:реклама|reklama|ad)\b', re.I)
+AD_PARENTHETICAL = re.compile(r'\(\s*' + AD_LABEL + r'\s*\)', re.I)
+AD_HEADING = re.compile(r'^\s*' + AD_LABEL + r'\s*[:：—\n]', re.I)
+AD_FOOTER = re.compile(r'(?:^|[.!?\n•|])\s*' + AD_LABEL + r'\s*[.!]?\s*$', re.I)
 AD_NAME=re.compile(r"(?<!\w)[A-Z][A-Za-z0-9&'’ʼʻ\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'’ʼʻ\-]*){0,5}")
 AD_STOP={'IT','HR','EIOS','III','II','I','IV','V','VI','VII','VIII','IX','X','Batafsil','Reklama','Telegram','Instagram','Facebook','Sayt','The','Today',
     'KUNDAN','SO‘NG','BIRINCHI','ANIQLANADI','JAMI','SOVG‘A','Chimyonda','Dam',
@@ -42,7 +46,9 @@ AD_STOP={'IT','HR','EIOS','III','II','I','IV','V','VI','VII','VIII','IX','X','Ba
 
 
 def is_advertisement(text):
-    return bool(AD_MARKER.search(re.sub(r'https?://\S+','',text)[-500:]))
+    text = re.sub(r'https?://\S+', ' ', text)
+    return bool(AD_HEADING.search(text) or AD_TAG.search(text) or
+                AD_PARENTHETICAL.search(text[-500:]) or AD_FOOTER.search(text))
 
 
 def advertising_brand(text,known):
@@ -167,38 +173,23 @@ class RuleResearcher:
     def classify(self,batch,now):
         result=[]
         for source in batch:
-            text=source['text'][:5000]
+            # A company mention or a business event never replaces an ad label.
+            # Check the complete post: long captions may put the label at the end.
+            if not is_advertisement(source['text']):
+                continue
+            text=source.get('article_text', source['text'])[:5000]
             if TRAGEDY.search(source['title']) or COMPETITOR.search(text[:500]):
                 continue
             article_company=source.get('article_company')
-            if is_advertisement(text) or article_company:
-                brand=(article_company,0,len(article_company)) if article_company and text.startswith(article_company) else advertising_brand(text,self.known)
-                if brand:
-                    company,start,end=brand
-                    anchor=re.search(re.escape(text[start:end]),text)
-                    quote=evidence(text,start,end,anchor)
-                    if quote:
-                        result.append(dict(source_id=source['id'],company=company,evidence_quote=quote,
-                            sector=sector(text),event_kind='рекламное размещение',service='Telegram и СМИ',
-                            hypothesis=HYPOTHESES['рекламное размещение'],priority='B',
-                            rationale='В публикации есть рекламная пометка и конкретный бренд. Контакт и актуальность предложения проверить.',confidence='средняя'))
-                        continue
-            events=[(kind,m) for kind,pattern in EVENTS for m in pattern.finditer(text)]
-            for company,start,end in brands(text,self.known):
-                if EXCLUDE.search(company): continue
-                choices=sorted(events,key=lambda pair:min(abs(pair[1].start()-end),abs(start-pair[1].end())))
-                for kind,event in choices:
-                    quote=evidence(text,start,end,event)
-                    if not quote: continue
-                    # A different named company between the brand and event is ambiguous.
-                    between=text[min(end,event.end()):max(start,event.start())]
-                    if any(other[0].casefold()!=company.casefold() for other in brands(between,())):
-                        continue
-                    service='Мероприятия' if kind=='мероприятие' else 'Telegram и СМИ' if kind in {'запуск','открытие'} else 'PR'
-                    result.append(dict(source_id=source['id'],company=company,evidence_quote=quote,
-                        sector=sector(quote),event_kind=kind,service=service,hypothesis=HYPOTHESES[kind]+' Предположение нужно проверить в разговоре.',
-                        priority='C' if kind in {'лицензирование','партнёрство'} else 'B',
-                        rationale='Правило: коммерческое название и сигнал «'+kind+'» найдены в одном фрагменте публикации; ручная проверка обязательна.',
-                        confidence='средняя'))
-                    break
+            brand=(article_company,0,len(article_company)) if article_company and text.startswith(article_company) else advertising_brand(text,self.known)
+            if not brand:
+                continue
+            company,start,end=brand
+            anchor=re.search(re.escape(text[start:end]),text)
+            quote=evidence(text,start,end,anchor)
+            if quote:
+                result.append(dict(source_id=source['id'],company=company,evidence_quote=quote,
+                    sector=sector(text),event_kind='рекламное размещение',service='Telegram и СМИ',
+                    hypothesis=HYPOTHESES['рекламное размещение'],priority='B',
+                    rationale='В публикации есть рекламная пометка и конкретный бренд. Контакт и актуальность предложения проверить.',confidence='средняя'))
         return result

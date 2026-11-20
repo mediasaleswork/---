@@ -41,12 +41,14 @@ def sponsored_article(source):
             if not re.fullmatch(r'[A-Za-z][A-Za-z0-9 -]{2,60}',company):continue
             if re.sub('[ -]','',company.casefold())!=host.split('.')[0].replace('-',''):continue
             if not re.match(re.escape(company)+r'\s+(?:предлагает|запускает|открывает|представляет)\b',body,re.I):continue
-            return dict(source,text=body,article_url=url,article_company=company,
+            # Retain the original marked teaser as evidence of paid placement.
+            return dict(source,article_text=body,article_url=url,article_company=company,
                         links=json.dumps([anchor['href'],url]))
     return None
 
 
 def validate(candidate, sources, now):
+    from .rules import is_advertisement
     if not isinstance(candidate, dict):
         return None
     sid = candidate.get("source_id")
@@ -54,13 +56,16 @@ def validate(candidate, sources, now):
     required = ("company", "evidence_quote", "sector", "event_kind", "service", "hypothesis", "priority", "rationale", "confidence")
     if not source or not link_host(source['url']) or any(not isinstance(candidate.get(k), str) or not candidate[k].strip() for k in required):
         return None
+    if not is_advertisement(source['text']):
+        return None
+    source_text = source.get('article_text', source['text'])
     company, quote = candidate["company"].strip(), candidate["evidence_quote"].strip()
     norm = lambda s: re.sub(r"\s+", " ", s).strip().casefold()
-    if not 2 <= len(company) <= 100 or len(quote)>280 or (len(quote)<50 and norm(quote)!=norm(source['text'])):
+    if not 2 <= len(company) <= 100 or len(quote)>280 or (len(quote)<50 and norm(quote)!=norm(source_text)):
         return None
     if re.search(r"^(?:IT Park|Центр технологий будущего|Национальное агентство|Министерств|Правительств)", company, re.I):
         return None
-    if norm(company) not in norm(quote) or norm(quote) not in norm(source["text"][:5000]):
+    if norm(company) not in norm(quote) or norm(quote) not in norm(source_text[:5000]):
         return None
     if candidate["service"] not in SERVICES or candidate["event_kind"] not in KINDS:
         return None

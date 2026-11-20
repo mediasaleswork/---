@@ -130,6 +130,25 @@ class SyncLifecycleTests(unittest.TestCase):
         self.assertEqual(self.sheet.rows['Лиды'][1][0],fresh['id'])
         self.assertEqual(self.sheet.rows['Публикации'][1][5],fresh['id'])
 
+    def test_ad_source_replaces_a_newer_news_source_and_preserves_team_fields(self):
+        news = self.add('Legacy', 10)
+        self.sheet.sync(self.store)
+        row = self.row('Лиды', news['id'])
+        row[11] = 'Написал'
+        row.append('Тахмина')
+        self.row('Скрипты', news['id'])[2] = 'Ручной скрипт'
+        ad = dict(news, event_kind='рекламное размещение', source_url='https://example.invalid/ad',
+                  published=(NOW-timedelta(minutes=1)).isoformat(), evidence_quote='Рекламная публикация Legacy')
+        self.store.add_lead(ad)
+        self.sheet.sync(self.store)
+        self.sheet.sync(self.store)
+        row = self.row('Лиды', news['id'])
+        self.assertEqual((row[4], row[8], row[11], row[17]),
+                         (ad['evidence_quote'], ad['source_url'], 'Написал', 'Тахмина'))
+        self.assertEqual(self.row('Скрипты', news['id'])[2], 'Ручной скрипт')
+        self.assertEqual(self.store.leads()[0]['source_url'], news['source_url'])
+        self.assertEqual(len(self.store.publications()), 2)
+
     def test_revised_source_updates_facts_and_history_but_preserves_custom_text(self):
         old=self.add('Edited')
         self.sheet.sync(self.store)

@@ -137,6 +137,15 @@ class Sheets:
             for key,value in v.get('scripts',{}).items():
                 script_versions.setdefault((v['id'],key),set()).add(value)
         latest={l['id']:l for l in store.leads()}
+        # Older CRM cards may point to a later editorial story. Prefer the most
+        # recent ad for those cards while keeping the full publication history.
+        for publication in versions:
+            ident=publication['id']
+            current=latest.get(ident)
+            if current and publication.get('event_kind')=='рекламное размещение' and (
+                current.get('event_kind')!='рекламное размещение' or publication['published']>current['published']
+            ):
+                latest[ident]=publication
         refreshed=False
         # A newer source refreshes the publication fields, while team-owned K:O stays intact.
         for index,row in enumerate(leads[1:],start=2):
@@ -165,9 +174,9 @@ class Sheets:
         # Key by stable ID, never by row order. Existing rows and manual edits stay intact.
         existing = {str(r[0]) for r in leads[1:] if r}
         existing_scripts = {str(r[0]) for r in scripts[1:] if r}
-        new_leads = [lead_row(l,self.timezone) for l in store.leads() if l["id"] not in existing]
+        new_leads = [lead_row(l,self.timezone) for l in latest.values() if l["id"] not in existing]
         new_scripts = [[l["id"],l["company"],*(l["scripts"][k] for k in ("first","followup","call","objections"))]
-            for l in store.leads() if l["id"] not in existing_scripts]
+            for l in latest.values() if l["id"] not in existing_scripts]
         if new_leads or refreshed:
             # Persist before any Google mutation. If values commit but the reply
             # or later sort fails, the next sync/restart must still sort them.
